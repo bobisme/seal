@@ -17,12 +17,6 @@ pub struct ParsedDiff {
 pub fn hunk_exclusion_ranges(hunks: &[DiffHunk]) -> Vec<(i64, i64)> {
     let mut ranges: Vec<(i64, i64)> = Vec::new();
     for h in hunks {
-        if h.old_count > 0 {
-            ranges.push((
-                i64::from(h.old_start),
-                i64::from(h.old_start + h.old_count.saturating_sub(1)),
-            ));
-        }
         if h.new_count > 0 {
             ranges.push((
                 i64::from(h.new_start),
