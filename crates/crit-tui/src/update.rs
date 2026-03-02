@@ -961,9 +961,21 @@ fn build_comment_request(model: &mut Model) -> Option<CommentRequest> {
             existing_comments: Vec::new(),
         })
     } else {
+        let line_map = model.line_map.borrow();
+        if let Some(&new_line) = line_map.get(&model.diff_cursor) {
+            return Some(CommentRequest {
+                review_id,
+                file_path,
+                start_line: new_line,
+                end_line: None,
+                thread_id: None,
+                existing_comments: Vec::new(),
+            });
+        }
+        drop(line_map);
+
         // Find the thread whose rendered position is closest to (and at or
-        // before) the cursor, so pressing 'a' targets the thread the user is
-        // actually looking at rather than the stale `expanded_thread`.
+        // before) the cursor, so pressing 'a' inside a comment block targets it.
         let thread_id = {
             let positions = model.thread_positions.borrow();
             let mut best: Option<(usize, String)> = None;
