@@ -307,7 +307,7 @@ fn main() -> Result<()> {
         Commands::Ui => {
             eprintln!("WARNING: `seal ui` is deprecated and will be removed in a future release.");
             eprintln!("  Install botseal-ui for the canonical interactive review experience:");
-            eprintln!("    cargo install --git https://github.com/bobisme/botseal-ui");
+            eprintln!("    cargo install --git https://github.com/bobisme/seal-ui");
             eprintln!("  Then run: seal-ui");
             eprintln!();
             seal::tui::run(&seal_root)?;

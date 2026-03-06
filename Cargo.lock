@@ -1691,7 +1691,7 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "seal-cli"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1713,7 +1713,7 @@ dependencies = [
 
 [[package]]
 name = "seal-core"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1733,7 +1733,7 @@ dependencies = [
 
 [[package]]
 name = "seal-tui"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "anyhow",
  "ftui-core",

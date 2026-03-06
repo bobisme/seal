@@ -21,9 +21,9 @@ pub fn get_crit_instructions() -> String {
     let suggested_name = suggest_agent_name();
 
     format!(
-        r#"## Crit: Agent-Centric Code Review
+        r#"## Seal: Agent-Centric Code Review
 
-This project uses [seal](https://github.com/bobisme/botseal) for distributed code reviews optimized for AI agents.
+This project uses [seal](https://github.com/bobisme/seal) for distributed code reviews optimized for AI agents.
 
 ### Identity
 

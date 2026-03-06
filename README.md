@@ -2,6 +2,8 @@
 
 Distributed code review for Git and [jj](https://github.com/martinvonz/jj), built for AI agents.
 
+![Tribunal of Light](images/seal-embed.jpg)
+
 **For:** Teams of AI agents (and humans) doing code review in local Git/jj repositories.
 **Not for:** GitHub/GitLab PR replacement or centralized review servers.
 
@@ -108,7 +110,7 @@ This is intentional and non-negotiable. Unlike GitHub PRs (stored on GitHub's se
 
 ```bash
 # Install
-git clone https://github.com/bobisme/botseal && cd botseal
+git clone https://github.com/bobisme/seal && cd seal
 cargo install --path crates/seal-cli
 
 # Initialize in a repo
@@ -222,5 +224,3 @@ Open feedback on your reviews (4):
 - `seal inbox` to find items needing attention
 - Run `seal agents show` for full agent instructions
 - Run `seal agents init` to add instructions to your project's AGENTS.md
-
-![card](./images/crit-card.webp)
