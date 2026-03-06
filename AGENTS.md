@@ -94,7 +94,7 @@ project-root/          ← bare repo (no source files here)
 - Use `maw exec <ws> -- <command>` to run commands in a workspace context
 - Use `maw exec default -- bn ...` for bones commands (always in default workspace)
 - Use `maw exec <ws> -- crit ...` for review commands (always in the review's workspace)
-- Never run `bn` or `seal` directly — always go through `maw exec`
+- Never run `bn` or `crit` directly — always go through `maw exec`
 - Do not run `jj`; this workflow is Git + maw.
 
 ### Bones Quick Reference
@@ -196,7 +196,7 @@ bus claims release --agent $AGENT --all  # when done
 Use `@<project>-<role>` mentions to request reviews:
 
 ```bash
-maw exec $WS -- seal reviews request <review-id> --reviewers $PROJECT-security --agent $AGENT
+maw exec $WS -- crit reviews request <review-id> --reviewers $PROJECT-security --agent $AGENT
 bus send --agent $AGENT $PROJECT "Review requested: <review-id> @$PROJECT-security" -L review-request
 ```
 
