@@ -17,7 +17,7 @@ bones = true
 maw = true
 seal = true
 botbus = true
-botty = true
+vessel = true
 
 # Code review configuration
 [review]
