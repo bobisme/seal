@@ -1,0 +1,3 @@
+# bones event log v1
+# fields: wall_ts_us	agent	itc	parents	type	item_id	data	event_hash
+1772819532701798	bob	itc:v3:AWKSc8kyZJPJk5EAAAAAQau9WtV610AAAAEz_AE		item.create	bn-1mfj	{"description":"this should apply everything, modules, data dirs, env vars, the binary, README/docs.\n\nthis is part of a rebrand of all my tooling","kind":"task","labels":["rename"],"title":"rename project to \"seal\""}	blake3:RvKOVdN8wYe8Y_DGVX8-ss_MDatH2NHRav0pjL62rA8
