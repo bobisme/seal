@@ -1,7 +1,7 @@
 # seal
 
 Project type: cli
-Tools: `beads`, `maw`, `seal`, `botbus`, `botty`
+Tools: `bones`, `maw`, `seal`, `rite`, `vessel`
 Reviewer roles: security
 
 Distributed code review for Git and jj, built for AI agent teams.
