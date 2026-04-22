@@ -7,6 +7,7 @@ pub mod helpers;
 pub mod init;
 pub mod migrate;
 pub mod reviews;
+pub mod sarif;
 pub mod status;
 pub mod sync;
 pub mod threads;
@@ -21,6 +22,7 @@ pub use reviews::{
     run_reviews_approve, run_reviews_create, run_reviews_list, run_reviews_merge,
     run_reviews_request, run_reviews_show,
 };
+pub use sarif::run_sarif_import;
 pub use status::{run_diff, run_status};
 pub use sync::run_sync;
 pub use threads::{

@@ -222,6 +222,35 @@ pub enum Commands {
         #[arg(long, value_name = "REVIEW_ID")]
         accept_regression: Option<String>,
     },
+
+    /// Import findings from a SARIF file into an existing review
+    #[command(subcommand)]
+    Sarif(SarifCommands),
+}
+
+// ============================================================================
+// SARIF subcommands
+// ============================================================================
+
+#[derive(Subcommand, Debug)]
+pub enum SarifCommands {
+    /// Import a SARIF file into an existing review.
+    ///
+    /// Each finding above --min-level becomes a comment thread anchored to
+    /// the finding's file and line. A fingerprint is embedded in each comment
+    /// so re-importing the same scan is idempotent.
+    Import {
+        /// Path to a SARIF 2.x JSON file
+        file: std::path::PathBuf,
+
+        /// Review ID to attach findings to (must be open)
+        #[arg(long)]
+        review: String,
+
+        /// Minimum severity to import: none, note, warning, error
+        #[arg(long, default_value = "warning")]
+        min_level: String,
+    },
 }
 
 // ============================================================================

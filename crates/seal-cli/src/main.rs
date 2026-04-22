@@ -8,12 +8,13 @@ use seal_cli::cli::commands::{
     run_agents_init, run_agents_show, run_block, run_comment, run_comments_add, run_comments_list,
     run_diff, run_doctor, run_inbox, run_init, run_lgtm, run_migrate, run_review,
     run_reviews_abandon, run_reviews_approve, run_reviews_create, run_reviews_list,
-    run_reviews_merge, run_reviews_request, run_reviews_show, run_status, run_sync,
-    run_threads_create, run_threads_list, run_threads_reopen, run_threads_resolve,
+    run_reviews_merge, run_reviews_request, run_reviews_show, run_sarif_import, run_status,
+    run_sync, run_threads_create, run_threads_list, run_threads_reopen, run_threads_resolve,
     run_threads_show,
 };
 use seal_cli::cli::{
-    AgentsCommands, Cli, Commands, CommentsCommands, ReviewsCommands, ThreadsCommands,
+    AgentsCommands, Cli, Commands, CommentsCommands, ReviewsCommands, SarifCommands,
+    ThreadsCommands,
 };
 use seal_core::events::get_agent_identity;
 use seal_core::jj::{resolve_seal_root_from_path, resolve_workspace_root};
@@ -382,6 +383,25 @@ fn main() -> Result<()> {
         } => {
             run_sync(&seal_root, rebuild, accept_regression, format)?;
         }
+
+        Commands::Sarif(cmd) => match cmd {
+            SarifCommands::Import {
+                file,
+                review,
+                min_level,
+            } => {
+                let scm = resolve_backend(&workspace_root, scm_preference)?;
+                run_sarif_import(
+                    &seal_root,
+                    scm.as_ref(),
+                    &file,
+                    &review,
+                    &min_level,
+                    identity.as_deref(),
+                    format,
+                )?;
+            }
+        },
     }
 
     Ok(())
