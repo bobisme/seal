@@ -8,6 +8,14 @@ prior to v0.27.0, see the [git tags](https://github.com/bobisme/seal/tags).
 
 ## [Unreleased]
 
+## [0.27.1] - 2026-04-25
+
+### Changed
+- Rewrote README to lead with what seal is for, cut hype, and reduce duplicated examples.
+- Prepared the `seal-core`, `seal-tui`, and `seal-cli` crates for crates.io publication
+  (added `repository`, `homepage`, `keywords`, `categories`, `authors`; pinned internal
+  path-deps with versions; added `LICENSE` and per-crate `README.md`).
+
 ## [0.27.0] - 2026-04-22
 
 ### Added
@@ -24,5 +32,6 @@ prior to v0.27.0, see the [git tags](https://github.com/bobisme/seal/tags).
   - Output summarizes `imported` / `skipped_level` / `skipped_duplicate` /
     `skipped_missing_file` / `skipped_no_location` plus per-finding thread IDs.
 
-[Unreleased]: https://github.com/bobisme/seal/compare/v0.27.0...HEAD
+[Unreleased]: https://github.com/bobisme/seal/compare/v0.27.1...HEAD
+[0.27.1]: https://github.com/bobisme/seal/releases/tag/v0.27.1
 [0.27.0]: https://github.com/bobisme/seal/releases/tag/v0.27.0
