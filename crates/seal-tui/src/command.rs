@@ -1,4 +1,5 @@
 //! Command definitions for the command palette.
+//! TODO: DELETE THIS LINE
 
 use crate::message::Message;
 
