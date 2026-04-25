@@ -26,14 +26,14 @@ jobs:
           openrouter-api-key: ${{ secrets.OPENROUTER_API_KEY }}
           provider: openrouter
           model: sonnet
-      - name: Post Snitch SARIF findings in the pull request
-        if: github.event_name == 'pull_request'
-        uses: sett-and-hive/sarif-to-comment-action@v2.0.1
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          repository: ${{ github.repository }}
-          branch: ${{ github.head_ref }}
-          pr-number: ${{ github.event.number }}
-          sarif-file: SECURITY_AUDIT_REPORT.sarif
-          title: Snitch Issue
-          dry-run: false
+      # - name: Post Snitch SARIF findings in the pull request
+      #   if: github.event_name == 'pull_request'
+      #   uses: sett-and-hive/sarif-to-comment-action@v2.0.1
+      #   with:
+      #     token: ${{ secrets.GITHUB_TOKEN }}
+      #     repository: ${{ github.repository }}
+      #     branch: ${{ github.head_ref }}
+      #     pr-number: ${{ github.event.number }}
+      #     sarif-file: SECURITY_AUDIT_REPORT.sarif
+      #     title: Snitch Issue
+      #     dry-run: false
