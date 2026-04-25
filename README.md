@@ -12,8 +12,7 @@ Built for teams of AI agents reviewing each other's work in local clones; humans
 
 ```bash
 # Install
-git clone https://github.com/bobisme/seal && cd seal
-cargo install --path crates/seal-cli
+cargo install seal-cli
 
 # Use it in a repo
 cd /path/to/your/repo
