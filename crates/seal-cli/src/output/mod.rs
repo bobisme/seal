@@ -145,9 +145,7 @@ fn render_text(value: &serde_json::Value) -> String {
             }
             parts.join("  ")
         }
-        serde_json::Value::Array(arr) => {
-            arr.iter().map(render_text).collect::<Vec<_>>().join("\n")
-        }
+        serde_json::Value::Array(arr) => arr.iter().map(render_text).collect::<Vec<_>>().join("\n"),
         _ => render_field_value(value),
     }
 }
@@ -171,7 +169,8 @@ fn render_field_value(value: &serde_json::Value) -> String {
         }
         serde_json::Value::Object(map) => {
             // Compact inline for nested objects
-            let parts: Vec<String> = map.iter()
+            let parts: Vec<String> = map
+                .iter()
                 .filter(|(_, v)| !v.is_null())
                 .map(|(k, v)| format!("{}:{}", k, render_field_value(v)))
                 .collect();
@@ -289,8 +288,14 @@ mod tests {
         }
 
         let items = vec![
-            Item { id: "1".to_string(), name: "first".to_string() },
-            Item { id: "2".to_string(), name: "second".to_string() },
+            Item {
+                id: "1".to_string(),
+                name: "first".to_string(),
+            },
+            Item {
+                id: "2".to_string(),
+                name: "second".to_string(),
+            },
         ];
 
         // Verify the envelope structure by building it the same way print_list does
@@ -374,8 +379,14 @@ mod text_format_tests {
         }
 
         let items = vec![
-            Item { id: "item-1".to_string(), name: "first".to_string() },
-            Item { id: "item-2".to_string(), name: "second".to_string() },
+            Item {
+                id: "item-1".to_string(),
+                name: "first".to_string(),
+            },
+            Item {
+                id: "item-2".to_string(),
+                name: "second".to_string(),
+            },
         ];
 
         let formatter = Formatter::new(OutputFormat::Text);
@@ -384,7 +395,7 @@ mod text_format_tests {
         // Should have one item per line
         let lines: Vec<&str> = output.lines().collect();
         assert_eq!(lines.len(), 2);
-        
+
         // Each line should start with ID
         assert!(lines[0].starts_with("item-1"));
         assert!(lines[1].starts_with("item-2"));

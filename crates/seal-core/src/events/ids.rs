@@ -4,7 +4,7 @@
 //! Comments use thread child IDs: th-xxx.1, th-xxx.2, etc.
 //! Powered by terseid for adaptive-length, collision-resistant IDs.
 
-use terseid::{IdConfig, IdGenerator, parse_id};
+use terseid::{parse_id, IdConfig, IdGenerator};
 
 /// Length of the random suffix (in base36 chars)
 const HASH_LENGTH: usize = 4;
@@ -28,7 +28,7 @@ fn random_seed() -> [u8; 16] {
 /// parse rules (e.g., 4+ char hashes must contain at least one digit).
 fn generate_valid_id(gen: &IdGenerator) -> String {
     for _ in 0..100 {
-        let id = gen.candidate(&random_seed(), HASH_LENGTH);
+        let id = gen.candidate(random_seed(), HASH_LENGTH);
         if parse_id(&id).is_ok() {
             return id;
         }
@@ -38,21 +38,25 @@ fn generate_valid_id(gen: &IdGenerator) -> String {
 }
 
 /// Generate a new review ID (e.g., "cr-1d3f")
+#[must_use]
 pub fn new_review_id() -> String {
     generate_valid_id(&review_generator())
 }
 
 /// Generate a new thread ID (e.g., "th-99az")
+#[must_use]
 pub fn new_thread_id() -> String {
     generate_valid_id(&thread_generator())
 }
 
 /// Generate a comment ID as a child of a thread (e.g., "th-abc.1")
+#[must_use]
 pub fn make_comment_id(thread_id: &str, comment_number: u32) -> String {
-    format!("{}.{}", thread_id, comment_number)
+    format!("{thread_id}.{comment_number}")
 }
 
 /// Check if a string looks like a valid review ID
+#[must_use]
 pub fn is_review_id(s: &str) -> bool {
     parse_id(s)
         .map(|parsed| parsed.prefix == "cr" && parsed.hash.len() >= 3)
@@ -60,6 +64,7 @@ pub fn is_review_id(s: &str) -> bool {
 }
 
 /// Check if a string looks like a valid thread ID
+#[must_use]
 pub fn is_thread_id(s: &str) -> bool {
     parse_id(s)
         .map(|parsed| parsed.prefix == "th" && parsed.hash.len() >= 3)
@@ -67,6 +72,7 @@ pub fn is_thread_id(s: &str) -> bool {
 }
 
 /// Check if a string looks like a valid comment ID (th-xxx.N format)
+#[must_use]
 pub fn is_comment_id(s: &str) -> bool {
     // Split on '.' to separate thread ID from comment number
     let parts: Vec<&str> = s.splitn(2, '.').collect();
@@ -89,16 +95,16 @@ mod tests {
     #[test]
     fn test_review_id_format() {
         let id = new_review_id();
-        assert!(id.starts_with("cr-"), "ID should start with 'cr-': {}", id);
-        assert!(id.len() >= 6, "ID should be at least 6 chars: {}", id);
+        assert!(id.starts_with("cr-"), "ID should start with 'cr-': {id}");
+        assert!(id.len() >= 6, "ID should be at least 6 chars: {id}");
         assert!(is_review_id(&id));
     }
 
     #[test]
     fn test_thread_id_format() {
         let id = new_thread_id();
-        assert!(id.starts_with("th-"), "ID should start with 'th-': {}", id);
-        assert!(id.len() >= 6, "ID should be at least 6 chars: {}", id);
+        assert!(id.starts_with("th-"), "ID should start with 'th-': {id}");
+        assert!(id.len() >= 6, "ID should be at least 6 chars: {id}");
         assert!(is_thread_id(&id));
     }
 
@@ -109,8 +115,7 @@ mod tests {
         let comment_id = make_comment_id(&thread_id, 1);
         assert!(
             comment_id.ends_with(".1"),
-            "Comment ID should end with '.1': {}",
-            comment_id
+            "Comment ID should end with '.1': {comment_id}"
         );
         assert!(is_comment_id(&comment_id));
 
@@ -126,7 +131,7 @@ mod tests {
         let mut ids: HashSet<String> = HashSet::new();
         for _ in 0..100 {
             let id = new_review_id();
-            assert!(ids.insert(id.clone()), "Generated duplicate ID: {}", id);
+            assert!(ids.insert(id.clone()), "Generated duplicate ID: {id}");
         }
     }
 
@@ -135,9 +140,9 @@ mod tests {
         // Stress test: all generated IDs must pass parse_id validation
         for _ in 0..500 {
             let rid = new_review_id();
-            assert!(is_review_id(&rid), "Generated invalid review ID: {}", rid);
+            assert!(is_review_id(&rid), "Generated invalid review ID: {rid}");
             let tid = new_thread_id();
-            assert!(is_thread_id(&tid), "Generated invalid thread ID: {}", tid);
+            assert!(is_thread_id(&tid), "Generated invalid thread ID: {tid}");
         }
     }
 

@@ -7,9 +7,9 @@ use crate::cli::commands::helpers::{
     ensure_initialized, open_services, resolve_review_thread_commit, review_not_found_error,
     thread_not_found_error,
 };
+use crate::output::{Formatter, OutputFormat};
 use seal_core::events::CodeSelection;
 use seal_core::jj::context::{extract_context, format_context};
-use crate::output::{Formatter, OutputFormat};
 use seal_core::scm::ScmRepo;
 
 /// Create a new comment thread on a file.
@@ -31,9 +31,8 @@ pub fn run_threads_create(
     let services = open_services(seal_root)?;
 
     // Verify review exists
-    let review = match services.reviews().get_optional(review_id)? {
-        None => return Err(review_not_found_error(seal_root, review_id)),
-        Some(r) => r,
+    let Some(review) = services.reviews().get_optional(review_id)? else {
+        return Err(review_not_found_error(seal_root, review_id));
     };
 
     if review.status != "open" && review.status != "approved" {
@@ -52,12 +51,7 @@ pub fn run_threads_create(
 
     // Verify file exists at the review's commit anchor.
     if !scm.file_exists(&commit_hash, file)? {
-        bail!(
-            "File does not exist in review {} at {}: {}",
-            review_id,
-            commit_hash,
-            file
-        );
+        bail!("File does not exist in review {review_id} at {commit_hash}: {file}");
     }
 
     // Use core service to create the thread
@@ -361,7 +355,7 @@ fn print_conversation(
         );
         // Indent the body for readability
         for line in comment.body.lines() {
-            println!("  {}", line);
+            println!("  {line}");
         }
     }
 
@@ -372,8 +366,7 @@ fn print_conversation(
             let timestamp = thread
                 .status_changed_at
                 .as_deref()
-                .map(format_timestamp)
-                .unwrap_or_else(|| "unknown time".to_string());
+                .map_or_else(|| "unknown time".to_string(), format_timestamp);
             print!(
                 "{} {} ({})",
                 c(colors::GREEN, changed_by),
@@ -381,7 +374,7 @@ fn print_conversation(
                 c(colors::DIM, &timestamp)
             );
             if let Some(ref reason) = thread.resolve_reason {
-                print!(": {}", reason);
+                print!(": {reason}");
             }
             println!();
         }
@@ -418,7 +411,7 @@ fn format_timestamp(iso_timestamp: &str) -> String {
                         _ => parts[1],
                     };
                     let day = parts[2].trim_start_matches('0');
-                    return format!("{} {}, {}", month, day, time_short);
+                    return format!("{month} {day}, {time_short}");
                 }
             }
         }
@@ -460,9 +453,13 @@ pub fn run_threads_resolve(
         // Get all threads and filter to open ones
         let all_reviews = services.reviews().list(None, None)?;
         for review in all_reviews {
-            let threads = services.threads().list(&review.review_id, Some("open"), file)?;
+            let threads = services
+                .threads()
+                .list(&review.review_id, Some("open"), file)?;
             for thread in threads {
-                services.threads().resolve(&thread.thread_id, reason.clone(), author)?;
+                services
+                    .threads()
+                    .resolve(&thread.thread_id, reason.clone(), author)?;
                 resolved_ids.push(thread.thread_id);
                 resolved_count += 1;
             }
@@ -473,14 +470,14 @@ pub fn run_threads_resolve(
             let thread = match services.threads().get_optional(tid)? {
                 None => return Err(thread_not_found_error(repo_root, tid)),
                 Some(t) if t.status == "resolved" => {
-                    bail!("Thread is already resolved: {}", tid);
+                    bail!("Thread is already resolved: {tid}");
                 }
                 Some(t) => t,
             };
             drop(thread);
 
             services.threads().resolve(tid, reason.clone(), author)?;
-            resolved_ids.push(tid.to_string());
+            resolved_ids.push(tid.clone());
             resolved_count += 1;
         }
     }
@@ -522,7 +519,9 @@ pub fn run_threads_reopen(
     };
     drop(thread);
 
-    services.threads().reopen(thread_id, reason.clone(), author)?;
+    services
+        .threads()
+        .reopen(thread_id, reason.clone(), author)?;
 
     let result = serde_json::json!({
         "thread_id": thread_id,
@@ -545,10 +544,7 @@ pub fn parse_line_selection(lines: &str) -> Result<CodeSelection> {
     if lines.contains('-') {
         let parts: Vec<&str> = lines.split('-').collect();
         if parts.len() != 2 {
-            bail!(
-                "Invalid line range format: '{}'. Expected 'start-end'",
-                lines
-            );
+            bail!("Invalid line range format: '{lines}'. Expected 'start-end'");
         }
         let start: u32 = parts[0]
             .trim()
@@ -563,7 +559,7 @@ pub fn parse_line_selection(lines: &str) -> Result<CodeSelection> {
             bail!("Line numbers must be 1-based");
         }
         if start > end {
-            bail!("Start line ({}) must be <= end line ({})", start, end);
+            bail!("Start line ({start}) must be <= end line ({end})");
         }
 
         Ok(CodeSelection::range(start, end))
@@ -571,7 +567,7 @@ pub fn parse_line_selection(lines: &str) -> Result<CodeSelection> {
         let line: u32 = lines
             .trim()
             .parse()
-            .with_context(|| format!("Invalid line number: '{}'", lines))?;
+            .with_context(|| format!("Invalid line number: '{lines}'"))?;
 
         if line == 0 {
             bail!("Line numbers must be 1-based");

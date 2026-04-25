@@ -4,8 +4,8 @@ use anyhow::{bail, Result};
 use std::path::Path;
 
 use crate::cli::commands::helpers::{
-    ensure_initialized, open_services, resolve_review_thread_commit,
-    review_not_found_error, thread_not_found_error,
+    ensure_initialized, open_services, resolve_review_thread_commit, review_not_found_error,
+    thread_not_found_error,
 };
 use crate::cli::commands::threads::parse_line_selection;
 use crate::output::{Formatter, OutputFormat};
@@ -29,7 +29,9 @@ pub fn run_comments_add(
         return Err(thread_not_found_error(repo_root, thread_id));
     }
 
-    let result = services.comments().add_to_thread(thread_id, message, author)?;
+    let result = services
+        .comments()
+        .add_to_thread(thread_id, message, author)?;
 
     let author_str = seal_core::events::get_agent_identity(author)?;
     let output = serde_json::json!({
@@ -70,9 +72,8 @@ pub fn run_comment(
     let services = open_services(seal_root)?;
 
     // Verify review exists and is open
-    let review = match services.reviews().get_optional(review_id)? {
-        None => return Err(review_not_found_error(seal_root, review_id)),
-        Some(r) => r,
+    let Some(review) = services.reviews().get_optional(review_id)? else {
+        return Err(review_not_found_error(seal_root, review_id));
     };
 
     if review.status != "open" {
@@ -85,19 +86,17 @@ pub fn run_comment(
 
     // Parse line selection
     let selection = parse_line_selection(line)?;
-    let start_line = selection.start_line() as i64;
+    let start_line = i64::from(selection.start_line());
 
     // Check if file exists when a new thread would be needed
-    let needs_new_thread = services.threads().find_at_location(review_id, file, start_line)?.is_none();
+    let needs_new_thread = services
+        .threads()
+        .find_at_location(review_id, file, start_line)?
+        .is_none();
     if needs_new_thread {
         let commit_hash = resolve_review_thread_commit(scm, &review);
         if !scm.file_exists(&commit_hash, file)? {
-            bail!(
-                "File does not exist in review {} at {}: {}",
-                review_id,
-                commit_hash,
-                file
-            );
+            bail!("File does not exist in review {review_id} at {commit_hash}: {file}");
         }
     }
 

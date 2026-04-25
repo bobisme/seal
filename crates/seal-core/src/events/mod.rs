@@ -142,16 +142,19 @@ pub enum CodeSelection {
 }
 
 impl CodeSelection {
-    pub fn line(n: u32) -> Self {
+    #[must_use]
+    pub const fn line(n: u32) -> Self {
         Self::Line { line: n }
     }
 
-    pub fn range(start: u32, end: u32) -> Self {
+    #[must_use]
+    pub const fn range(start: u32, end: u32) -> Self {
         Self::Range { start, end }
     }
 
     /// Get the start line of the selection.
-    pub fn start_line(&self) -> u32 {
+    #[must_use]
+    pub const fn start_line(&self) -> u32 {
         match self {
             Self::Line { line } => *line,
             Self::Range { start, .. } => *start,
@@ -159,7 +162,8 @@ impl CodeSelection {
     }
 
     /// Get the end line of the selection (same as start for single line).
-    pub fn end_line(&self) -> u32 {
+    #[must_use]
+    pub const fn end_line(&self) -> u32 {
         match self {
             Self::Line { line } => *line,
             Self::Range { end, .. } => *end,

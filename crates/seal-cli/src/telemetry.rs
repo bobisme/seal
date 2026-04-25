@@ -64,13 +64,12 @@ pub fn init() -> TelemetryGuard {
 }
 
 /// Minimal subscriber that forwards warn+ events to stderr.
-/// Ensures tracing::warn!() calls are visible even without OTLP configured.
+/// Ensures `tracing::warn`!() calls are visible even without OTLP configured.
 fn init_noop() -> TelemetryGuard {
     use tracing_subscriber::layer::SubscriberExt as _;
     use tracing_subscriber::util::SubscriberInitExt as _;
 
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("warn"));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
 
     tracing_subscriber::registry()
         .with(filter)
@@ -199,7 +198,8 @@ pub fn current_traceparent() -> Option<String> {
 
 /// Stub when otel feature is disabled.
 #[cfg(not(feature = "otel"))]
-pub fn current_traceparent() -> Option<String> {
+#[must_use]
+pub const fn current_traceparent() -> Option<String> {
     None
 }
 

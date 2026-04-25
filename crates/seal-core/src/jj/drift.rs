@@ -33,21 +33,19 @@ pub enum DriftResult {
 impl DriftResult {
     /// Get the current line number if the line still exists.
     #[must_use]
-    pub fn current_line(&self) -> Option<u32> {
+    pub const fn current_line(&self) -> Option<u32> {
         match self {
-            DriftResult::Unchanged { current_line } => Some(*current_line),
-            DriftResult::Shifted { current_line, .. } => Some(*current_line),
-            DriftResult::Modified | DriftResult::Deleted => None,
+            Self::Unchanged { current_line } | Self::Shifted { current_line, .. } => {
+                Some(*current_line)
+            }
+            Self::Modified | Self::Deleted => None,
         }
     }
 
     /// Check if the anchor is still valid (line exists and wasn't modified).
     #[must_use]
-    pub fn is_valid(&self) -> bool {
-        matches!(
-            self,
-            DriftResult::Unchanged { .. } | DriftResult::Shifted { .. }
-        )
+    pub const fn is_valid(&self) -> bool {
+        matches!(self, Self::Unchanged { .. } | Self::Shifted { .. })
     }
 }
 
@@ -76,7 +74,7 @@ impl HunkHeader {
     pub fn parse(line: &str) -> Result<Self> {
         let line = line.trim();
         if !line.starts_with("@@") {
-            bail!("Not a hunk header: {}", line);
+            bail!("Not a hunk header: {line}");
         }
 
         // Find the second @@ to isolate the range part
@@ -92,13 +90,13 @@ impl HunkHeader {
         // Split on space to get old and new ranges
         let parts: Vec<&str> = range_part.split_whitespace().collect();
         if parts.len() < 2 {
-            bail!("Invalid hunk header format: {}", line);
+            bail!("Invalid hunk header format: {line}");
         }
 
         let (old_start, old_count) = Self::parse_range(parts[0], '-')?;
         let (new_start, new_count) = Self::parse_range(parts[1], '+')?;
 
-        Ok(HunkHeader {
+        Ok(Self {
             old_start,
             old_count,
             new_start,
@@ -166,7 +164,7 @@ impl Hunk {
             // Skip other lines (e.g., "\ No newline at end of file")
         }
 
-        Ok(Hunk {
+        Ok(Self {
             header,
             lines: diff_lines,
         })
@@ -207,7 +205,7 @@ pub fn parse_hunks(diff: &str) -> Result<Vec<Hunk>> {
 ///
 /// # Arguments
 ///
-/// * `repo` - The JjRepo wrapper
+/// * `repo` - The `JjRepo` wrapper
 /// * `file` - Path to the file (relative to repo root)
 /// * `original_line` - The line number when the anchor was created (1-indexed)
 /// * `original_commit` - The commit where the anchor was created
@@ -485,12 +483,12 @@ index 1234567..abcdefg 100644
     }
 
     /// Test drift detection with a synthetic diff scenario.
-    /// We use the existing diff_git_file method output format.
+    /// We use the existing `diff_git_file` method output format.
     #[test]
     fn test_drift_unchanged_after_later_changes() {
         // Simulate: changes at line 10-12, checking line 5
         // Line 5 should be unchanged
-        let diff = r#"diff --git a/test.rs b/test.rs
+        let diff = r"diff --git a/test.rs b/test.rs
 --- a/test.rs
 +++ b/test.rs
 @@ -10,3 +10,5 @@
@@ -499,7 +497,7 @@ index 1234567..abcdefg 100644
 +    // another
      todo!()
  }
-"#;
+";
         let hunks = parse_hunks(diff).unwrap();
         assert_eq!(hunks.len(), 1);
         // Hunk starts at line 10, our line 5 is before it
@@ -510,7 +508,7 @@ index 1234567..abcdefg 100644
     #[test]
     fn test_drift_shifted_by_insertion() {
         // Insert 2 lines at line 3, original anchor at line 5 should become line 7
-        let diff = r#"diff --git a/test.rs b/test.rs
+        let diff = r"diff --git a/test.rs b/test.rs
 --- a/test.rs
 +++ b/test.rs
 @@ -1,5 +1,7 @@
@@ -521,7 +519,7 @@ index 1234567..abcdefg 100644
  line3
  line4
  line5
-"#;
+";
         let hunks = parse_hunks(diff).unwrap();
 
         // Verify the hunk structure
@@ -536,7 +534,7 @@ index 1234567..abcdefg 100644
     #[test]
     fn test_drift_shifted_by_deletion() {
         // Delete 2 lines before line 5, anchor should become line 3
-        let diff = r#"diff --git a/test.rs b/test.rs
+        let diff = r"diff --git a/test.rs b/test.rs
 --- a/test.rs
 +++ b/test.rs
 @@ -1,5 +1,3 @@
@@ -545,7 +543,7 @@ index 1234567..abcdefg 100644
 -line3
  line4
  line5
-"#;
+";
         let hunks = parse_hunks(diff).unwrap();
 
         // Verify the hunk structure
@@ -557,7 +555,7 @@ index 1234567..abcdefg 100644
     #[test]
     fn test_drift_deleted_line() {
         // Line 3 is deleted
-        let diff = r#"diff --git a/test.rs b/test.rs
+        let diff = r"diff --git a/test.rs b/test.rs
 --- a/test.rs
 +++ b/test.rs
 @@ -1,5 +1,4 @@
@@ -566,7 +564,7 @@ index 1234567..abcdefg 100644
 -line3
  line4
  line5
-"#;
+";
         let hunks = parse_hunks(diff).unwrap();
 
         // Walk through the hunk manually
@@ -582,19 +580,19 @@ index 1234567..abcdefg 100644
         assert_eq!(hunks[0].lines[4], DiffLine::Context); // line5
     }
 
-    /// Test pure-addition hunk (old_count=0) at a specific line.
+    /// Test pure-addition hunk (`old_count=0`) at a specific line.
     /// Pure additions should shift lines at or after the insertion point.
     #[test]
     fn test_parse_hunks_pure_addition() {
         // @@ -5,0 +5,3 @@ means: insert 3 lines at position 5 (no old lines consumed)
-        let diff = r#"diff --git a/test.rs b/test.rs
+        let diff = r"diff --git a/test.rs b/test.rs
 --- a/test.rs
 +++ b/test.rs
 @@ -5,0 +5,3 @@
 +new1
 +new2
 +new3
-"#;
+";
         let hunks = parse_hunks(diff).unwrap();
         assert_eq!(hunks.len(), 1);
         assert_eq!(hunks[0].header.old_start, 5);
@@ -610,7 +608,7 @@ index 1234567..abcdefg 100644
     }
 
     /// Test new-file diff: @@ -0,0 +1,N @@
-    /// When a file is created, old_count=0 and old_start=0.
+    /// When a file is created, `old_count=0` and `old_start=0`.
     #[test]
     fn test_parse_hunks_new_file() {
         let diff = r#"diff --git a/new.rs b/new.rs
@@ -637,10 +635,10 @@ new file mode 100644
     }
 
     /// Test mixed hunks: pure-addition at line 5, then normal edit at line 15.
-    /// This verifies the fix for hunk_old_end calculation with old_count=0.
+    /// This verifies the fix for `hunk_old_end` calculation with `old_count=0`.
     #[test]
     fn test_parse_hunks_mixed_pure_and_normal() {
-        let diff = r#"diff --git a/test.rs b/test.rs
+        let diff = r"diff --git a/test.rs b/test.rs
 --- a/test.rs
 +++ b/test.rs
 @@ -5,0 +5,2 @@
@@ -651,7 +649,7 @@ new file mode 100644
 -removed
 +modified
  line16
-"#;
+";
         let hunks = parse_hunks(diff).unwrap();
         assert_eq!(hunks.len(), 2);
 
@@ -667,12 +665,12 @@ new file mode 100644
     /// Test drift calculation with pure-addition hunk:
     /// If we have 5 lines total, and insert 3 lines at line 3,
     /// line 3 stays at 3 (insertion happens before), but lines at/after 3 shift down by 3.
-    /// This is a semantic test that verifies the hunk_old_end fix.
+    /// This is a semantic test that verifies the `hunk_old_end` fix.
     #[test]
     fn test_drift_pure_addition_before_anchor() {
         // Hunk: @@ -3,0 +3,3 @@ (insert 3 lines before line 3)
         // Original anchor at line 5 should shift to line 8 (+3)
-        let diff = r#"diff --git a/test.rs b/test.rs
+        let diff = r"diff --git a/test.rs b/test.rs
 --- a/test.rs
 +++ b/test.rs
 @@ -1,5 +1,8 @@
@@ -684,7 +682,7 @@ new file mode 100644
  line3
  line4
  line5
-"#;
+";
         let hunks = parse_hunks(diff).unwrap();
         assert_eq!(hunks.len(), 1);
         // Hunk spans lines 1-5 in old, becomes 1-8 in new
@@ -697,7 +695,7 @@ new file mode 100644
     /// the line should shift to 8 (+3).
     #[test]
     fn test_drift_pure_addition_at_anchor() {
-        let diff = r#"diff --git a/test.rs b/test.rs
+        let diff = r"diff --git a/test.rs b/test.rs
 --- a/test.rs
 +++ b/test.rs
 @@ -1,5 +1,8 @@
@@ -709,15 +707,15 @@ new file mode 100644
 +inserted2
 +inserted3
  line5
-"#;
+";
         let hunks = parse_hunks(diff).unwrap();
         assert_eq!(hunks.len(), 1);
         // Old lines 1-5 map to new lines 1-5 (context) then +3 inserted lines, then line5
         // Original line 5 should become line 8 in the new version
     }
 
-    /// Test that pure-addition at old_count=0 doesn't break hunk_old_end calculation.
-    /// This directly tests the fix for the saturating_sub(1) bug.
+    /// Test that pure-addition at `old_count=0` doesn't break `hunk_old_end` calculation.
+    /// This directly tests the fix for the `saturating_sub(1)` bug.
     #[test]
     fn test_hunk_header_pure_addition_old_count_zero() {
         let header = HunkHeader::parse("@@ -5,0 +5,3 @@").unwrap();

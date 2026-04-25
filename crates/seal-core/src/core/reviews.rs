@@ -17,7 +17,7 @@ pub struct ReviewService<'a> {
 }
 
 impl<'a> ReviewService<'a> {
-    pub(crate) fn new(ctx: &'a CoreContext, db: &'a ProjectionDb) -> Self {
+    pub(crate) const fn new(ctx: &'a CoreContext, db: &'a ProjectionDb) -> Self {
         Self { ctx, db }
     }
 
@@ -76,12 +76,8 @@ impl<'a> ReviewService<'a> {
         reviewers: Option<Vec<String>>,
         author: Option<&str>,
     ) -> CoreResult<String> {
-        let change_id = scm
-            .current_anchor()
-            .map_err(CoreError::Internal)?;
-        let commit_id = scm
-            .current_commit()
-            .map_err(CoreError::Internal)?;
+        let change_id = scm.current_anchor().map_err(CoreError::Internal)?;
+        let commit_id = scm.current_commit().map_err(CoreError::Internal)?;
 
         let review_id = new_review_id();
         let author_str = get_agent_identity(author).map_err(CoreError::Internal)?;
@@ -101,8 +97,8 @@ impl<'a> ReviewService<'a> {
             }),
         );
 
-        let log = open_or_create_review(self.ctx.seal_root(), &review_id)
-            .map_err(CoreError::Internal)?;
+        let log =
+            open_or_create_review(self.ctx.seal_root(), &review_id).map_err(CoreError::Internal)?;
         log.append(&event).map_err(CoreError::Internal)?;
 
         // Request reviewers if specified
@@ -149,8 +145,8 @@ impl<'a> ReviewService<'a> {
             }),
         );
 
-        let log = open_or_create_review(self.ctx.seal_root(), review_id)
-            .map_err(CoreError::Internal)?;
+        let log =
+            open_or_create_review(self.ctx.seal_root(), review_id).map_err(CoreError::Internal)?;
         log.append(&event).map_err(CoreError::Internal)?;
 
         Ok(())
@@ -184,8 +180,8 @@ impl<'a> ReviewService<'a> {
             }),
         );
 
-        let log = open_or_create_review(self.ctx.seal_root(), review_id)
-            .map_err(CoreError::Internal)?;
+        let log =
+            open_or_create_review(self.ctx.seal_root(), review_id).map_err(CoreError::Internal)?;
         log.append(&event).map_err(CoreError::Internal)?;
 
         Ok(())
@@ -211,8 +207,8 @@ impl<'a> ReviewService<'a> {
             }),
         );
 
-        let log = open_or_create_review(self.ctx.seal_root(), review_id)
-            .map_err(CoreError::Internal)?;
+        let log =
+            open_or_create_review(self.ctx.seal_root(), review_id).map_err(CoreError::Internal)?;
         log.append(&event).map_err(CoreError::Internal)?;
 
         Ok(())
@@ -244,8 +240,8 @@ impl<'a> ReviewService<'a> {
             }),
         );
 
-        let log = open_or_create_review(self.ctx.seal_root(), review_id)
-            .map_err(CoreError::Internal)?;
+        let log =
+            open_or_create_review(self.ctx.seal_root(), review_id).map_err(CoreError::Internal)?;
         log.append(&event).map_err(CoreError::Internal)?;
 
         Ok(())
@@ -277,8 +273,8 @@ impl<'a> ReviewService<'a> {
             }),
         );
 
-        let log = open_or_create_review(self.ctx.seal_root(), review_id)
-            .map_err(CoreError::Internal)?;
+        let log =
+            open_or_create_review(self.ctx.seal_root(), review_id).map_err(CoreError::Internal)?;
         log.append(&event).map_err(CoreError::Internal)?;
 
         Ok(())

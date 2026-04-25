@@ -47,7 +47,14 @@ impl Highlighter {
             .themes
             .get("base16-ocean.dark")
             .cloned()
-            .unwrap_or_else(|| theme_set.themes.values().next().unwrap().clone());
+            .unwrap_or_else(|| {
+                theme_set
+                    .themes
+                    .values()
+                    .next()
+                    .expect("bundled syntect theme set is non-empty")
+                    .clone()
+            });
 
         Self { syntax_set, theme }
     }
@@ -71,7 +78,14 @@ impl Highlighter {
                     .themes
                     .get("base16-ocean.dark")
                     .cloned()
-                    .unwrap_or_else(|| theme_set.themes.values().next().unwrap().clone())
+                    .unwrap_or_else(|| {
+                        theme_set
+                            .themes
+                            .values()
+                            .next()
+                            .expect("bundled syntect theme set is non-empty")
+                            .clone()
+                    })
             });
 
         Self { syntax_set, theme }

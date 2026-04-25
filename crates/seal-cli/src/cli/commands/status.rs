@@ -5,11 +5,11 @@ use serde::Serialize;
 use std::path::Path;
 
 use crate::cli::commands::helpers::{ensure_initialized, open_services, review_not_found_error};
-use seal_core::sealignore::{AllFilesIgnoredError, SealIgnore};
-use seal_core::jj::drift::{calculate_drift, DriftResult};
 use crate::output::{Formatter, OutputFormat};
+use seal_core::jj::drift::{calculate_drift, DriftResult};
 use seal_core::projection::ThreadSummary;
 use seal_core::scm::ScmRepo;
+use seal_core::sealignore::{AllFilesIgnoredError, SealIgnore};
 
 /// Thread status with drift information.
 #[derive(Debug, Clone, Serialize)]
@@ -60,9 +60,17 @@ pub fn run_status(
         }
     } else {
         // Get all open reviews
-        services.reviews().list(Some("open"), None)?
+        services
+            .reviews()
+            .list(Some("open"), None)?
             .into_iter()
-            .filter_map(|rs| services.reviews().get_optional(&rs.review_id).ok().flatten())
+            .filter_map(|rs| {
+                services
+                    .reviews()
+                    .get_optional(&rs.review_id)
+                    .ok()
+                    .flatten()
+            })
             .collect()
     };
 
@@ -71,7 +79,9 @@ pub fn run_status(
     for review in reviews {
         // Get threads for this review
         let status_filter = if unresolved_only { Some("open") } else { None };
-        let threads = services.threads().list(&review.review_id, status_filter, None)?;
+        let threads = services
+            .threads()
+            .list(&review.review_id, status_filter, None)?;
 
         let mut thread_entries = Vec::new();
         let mut drift_count = 0;
@@ -98,18 +108,18 @@ pub fn run_status(
 
             let (current_line, drift_status) = match &drift_result {
                 DriftResult::Unchanged { current_line } => {
-                    (Some(*current_line as i64), "unchanged".to_string())
+                    (Some(i64::from(*current_line)), "unchanged".to_string())
                 }
                 DriftResult::Shifted {
                     current_line,
                     original_line,
                 } => {
                     drift_count += 1;
-                    let delta = *current_line as i64 - *original_line as i64;
+                    let delta = i64::from(*current_line) - i64::from(*original_line);
                     let direction = if delta > 0 { "+" } else { "" };
                     (
-                        Some(*current_line as i64),
-                        format!("shifted({}{delta})", direction),
+                        Some(i64::from(*current_line)),
+                        format!("shifted({direction}{delta})"),
                     )
                 }
                 DriftResult::Modified => {
@@ -182,9 +192,8 @@ pub fn run_diff(
     let services = open_services(seal_root)?;
 
     // Get the review
-    let review = match services.reviews().get_optional(review_id)? {
-        Some(r) => r,
-        None => return Err(review_not_found_error(seal_root, review_id)),
+    let Some(review) = services.reviews().get_optional(review_id)? else {
+        return Err(review_not_found_error(seal_root, review_id));
     };
 
     // Get target commit: resolve the review's change_id to its current commit

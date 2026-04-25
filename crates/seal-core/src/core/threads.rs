@@ -16,7 +16,7 @@ pub struct ThreadService<'a> {
 }
 
 impl<'a> ThreadService<'a> {
-    pub(crate) fn new(ctx: &'a CoreContext, db: &'a ProjectionDb) -> Self {
+    pub(crate) const fn new(ctx: &'a CoreContext, db: &'a ProjectionDb) -> Self {
         Self { ctx, db }
     }
 
@@ -74,8 +74,8 @@ impl<'a> ThreadService<'a> {
             }),
         );
 
-        let log = open_or_create_review(self.ctx.seal_root(), review_id)
-            .map_err(CoreError::Internal)?;
+        let log =
+            open_or_create_review(self.ctx.seal_root(), review_id).map_err(CoreError::Internal)?;
         log.append(&event).map_err(CoreError::Internal)?;
 
         Ok(thread_id)

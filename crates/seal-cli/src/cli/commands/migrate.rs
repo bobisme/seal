@@ -8,13 +8,13 @@ use std::path::Path;
 
 use anyhow::{bail, Context, Result};
 
+use crate::output::OutputFormat;
 use seal_core::events::{Event, EventEnvelope};
 use seal_core::log::{open_or_create_review, AppendLog, FileLog};
-use crate::output::OutputFormat;
 use seal_core::version::{detect_version, write_version_file, DataVersion, CURRENT_VERSION};
 
 /// Check if a string looks like a legacy review ID.
-/// More permissive than is_review_id - just checks prefix and basic format.
+/// More permissive than `is_review_id` - just checks prefix and basic format.
 /// Used for migration to support pre-terseid IDs that don't have digits.
 fn is_legacy_review_id(s: &str) -> bool {
     s.starts_with("cr-") && s.len() >= 6 && s[3..].chars().all(|c| c.is_ascii_alphanumeric())
@@ -44,7 +44,7 @@ fn event_dedup_key(e: &EventEnvelope) -> String {
 }
 
 /// Return a short label for an event type (for logging without leaking content).
-fn event_type_label(event: &Event) -> &'static str {
+const fn event_type_label(event: &Event) -> &'static str {
     match event {
         Event::ReviewCreated(_) => "ReviewCreated",
         Event::ReviewersRequested(_) => "ReviewersRequested",
@@ -171,27 +171,24 @@ pub fn run_migrate(
 
     for event in &events {
         let review_id = resolve_review_id(&event.event, &thread_to_review);
-        match review_id {
-            Some(id) => {
-                events_by_review
-                    .entry(id.to_string())
-                    .or_default()
-                    .push(event.clone());
-            }
-            None => {
-                orphaned_count += 1;
-                eprintln!(
-                    "WARNING: Could not resolve review_id for {} event at {}",
-                    event_type_label(&event.event),
-                    event.ts.to_rfc3339()
-                );
-            }
+        if let Some(id) = review_id {
+            events_by_review
+                .entry(id.to_string())
+                .or_default()
+                .push(event.clone());
+        } else {
+            orphaned_count += 1;
+            eprintln!(
+                "WARNING: Could not resolve review_id for {} event at {}",
+                event_type_label(&event.event),
+                event.ts.to_rfc3339()
+            );
         }
     }
 
     // Summary
     let total_events = events.len();
-    let migrated_events: usize = events_by_review.values().map(|v| v.len()).sum();
+    let migrated_events: usize = events_by_review.values().map(std::vec::Vec::len).sum();
     let review_count = events_by_review.len();
 
     if dry_run {
@@ -216,9 +213,9 @@ pub fn run_migrate(
             );
         } else {
             println!("DRY RUN - Would migrate:");
-            println!("  Total events: {}", total_events);
-            println!("  Reviews: {}", review_count);
-            for (id, evts) in events_by_review.iter() {
+            println!("  Total events: {total_events}");
+            println!("  Reviews: {review_count}");
+            for (id, evts) in &events_by_review {
                 println!("    {}: {} events", id, evts.len());
             }
         }
@@ -229,9 +226,8 @@ pub fn run_migrate(
     for (review_id, review_events) in &events_by_review {
         if !is_legacy_review_id(review_id) {
             bail!(
-                "Invalid review_id '{}' found in events — refusing to create path. \
-                 Expected format: cr-XXXX",
-                review_id
+                "Invalid review_id '{review_id}' found in events — refusing to create path. \
+                 Expected format: cr-XXXX"
             );
         }
         let log = open_or_create_review(seal_root, review_id)?;
@@ -273,15 +269,14 @@ pub fn run_migrate(
         if orphaned_count > 0 {
             result["orphaned_events"] = serde_json::json!(orphaned_count);
         }
-        println!("{}", result);
+        println!("{result}");
     } else {
         println!("✓ Migration complete!");
-        println!("  Events migrated: {}/{}", migrated_events, total_events);
-        println!("  Reviews: {}", review_count);
+        println!("  Events migrated: {migrated_events}/{total_events}");
+        println!("  Reviews: {review_count}");
         if orphaned_count > 0 {
             println!(
-                "  WARNING: {} event(s) could not be associated with a review (orphaned)",
-                orphaned_count
+                "  WARNING: {orphaned_count} event(s) could not be associated with a review (orphaned)"
             );
         }
         if backup {
@@ -331,21 +326,18 @@ fn run_remigrate_from_backup(seal_root: &Path, dry_run: bool, format: OutputForm
 
     for event in &backup_events {
         let review_id = resolve_review_id(&event.event, &thread_to_review);
-        match review_id {
-            Some(id) => {
-                events_by_review
-                    .entry(id.to_string())
-                    .or_default()
-                    .push(event.clone());
-            }
-            None => {
-                orphaned_count += 1;
-                eprintln!(
-                    "WARNING: Could not resolve review_id for {} event at {}",
-                    event_type_label(&event.event),
-                    event.ts.to_rfc3339()
-                );
-            }
+        if let Some(id) = review_id {
+            events_by_review
+                .entry(id.to_string())
+                .or_default()
+                .push(event.clone());
+        } else {
+            orphaned_count += 1;
+            eprintln!(
+                "WARNING: Could not resolve review_id for {} event at {}",
+                event_type_label(&event.event),
+                event.ts.to_rfc3339()
+            );
         }
     }
 
@@ -355,9 +347,8 @@ fn run_remigrate_from_backup(seal_root: &Path, dry_run: bool, format: OutputForm
     for (review_id, backup_review_events) in &events_by_review {
         if !is_legacy_review_id(review_id) {
             bail!(
-                "Invalid review_id '{}' found in backup — refusing to create path. \
-                 Expected format: cr-XXXX",
-                review_id
+                "Invalid review_id '{review_id}' found in backup — refusing to create path. \
+                 Expected format: cr-XXXX"
             );
         }
         let log = open_or_create_review(seal_root, review_id)?;
@@ -402,28 +393,25 @@ fn run_remigrate_from_backup(seal_root: &Path, dry_run: bool, format: OutputForm
         if orphaned_count > 0 {
             result["orphaned_events"] = serde_json::json!(orphaned_count);
         }
-        println!("{}", result);
+        println!("{result}");
     } else {
         if dry_run {
             println!("DRY RUN - Would recover:");
         } else {
             println!("✓ Re-migration complete!");
         }
-        println!("  Events recovered: {}", total_recovered);
+        println!("  Events recovered: {total_recovered}");
         println!("  Reviews affected: {}", events_by_review.len());
         println!("  Backup total events: {}", backup_events.len());
         if orphaned_count > 0 {
-            println!(
-                "  WARNING: {} event(s) could not be associated with a review",
-                orphaned_count
-            );
+            println!("  WARNING: {orphaned_count} event(s) could not be associated with a review");
         }
     }
 
     Ok(())
 }
 
-/// Build a map from thread_id to review_id using ThreadCreated events.
+/// Build a map from `thread_id` to `review_id` using `ThreadCreated` events.
 fn build_thread_review_map(events: &[EventEnvelope]) -> HashMap<String, String> {
     let mut map = HashMap::new();
     for event in events {
@@ -434,8 +422,8 @@ fn build_thread_review_map(events: &[EventEnvelope]) -> HashMap<String, String> 
     map
 }
 
-/// Resolve the review_id for an event, using the thread→review map for
-/// events that only carry a thread_id (CommentAdded, ThreadResolved, ThreadReopened).
+/// Resolve the `review_id` for an event, using the thread→review map for
+/// events that only carry a `thread_id` (`CommentAdded`, `ThreadResolved`, `ThreadReopened`).
 fn resolve_review_id<'a>(
     event: &'a Event,
     thread_to_review: &'a HashMap<String, String>,
@@ -448,9 +436,15 @@ fn resolve_review_id<'a>(
         Event::ReviewMerged(e) => Some(&e.review_id),
         Event::ReviewAbandoned(e) => Some(&e.review_id),
         Event::ThreadCreated(e) => Some(&e.review_id),
-        Event::CommentAdded(e) => thread_to_review.get(&e.thread_id).map(|s| s.as_str()),
-        Event::ThreadResolved(e) => thread_to_review.get(&e.thread_id).map(|s| s.as_str()),
-        Event::ThreadReopened(e) => thread_to_review.get(&e.thread_id).map(|s| s.as_str()),
+        Event::CommentAdded(e) => thread_to_review
+            .get(&e.thread_id)
+            .map(std::string::String::as_str),
+        Event::ThreadResolved(e) => thread_to_review
+            .get(&e.thread_id)
+            .map(std::string::String::as_str),
+        Event::ThreadReopened(e) => thread_to_review
+            .get(&e.thread_id)
+            .map(std::string::String::as_str),
     }
 }
 
@@ -473,7 +467,7 @@ mod tests {
                 scm_kind: Some("jj".to_string()),
                 scm_anchor: Some("change123".to_string()),
                 initial_commit: "commit456".to_string(),
-                title: format!("Test Review {}", review_id),
+                title: format!("Test Review {review_id}"),
                 description: None,
             }),
         )
@@ -603,9 +597,9 @@ mod tests {
         assert_eq!(events2.len(), 3);
     }
 
-    /// Regression test: v1→v2 migration must preserve CommentAdded,
-    /// ThreadResolved, and ThreadReopened events (they only have thread_id,
-    /// not review_id, and were previously dropped).
+    /// Regression test: v1→v2 migration must preserve `CommentAdded`,
+    /// `ThreadResolved`, and `ThreadReopened` events (they only have `thread_id`,
+    /// not `review_id`, and were previously dropped).
     #[test]
     fn test_migrate_preserves_thread_linked_events() {
         let dir = tempdir().unwrap();
@@ -786,7 +780,7 @@ mod tests {
         assert!(!legacy_path.with_extension("jsonl.v1.backup").exists());
     }
 
-    /// Regression test: crafted review_id with path traversal must be rejected.
+    /// Regression test: crafted `review_id` with path traversal must be rejected.
     #[test]
     fn test_migrate_rejects_path_traversal_review_id() {
         let dir = tempdir().unwrap();
@@ -818,8 +812,7 @@ mod tests {
         let err = result.unwrap_err().to_string();
         assert!(
             err.contains("Invalid review_id"),
-            "Error should mention invalid review_id, got: {}",
-            err
+            "Error should mention invalid review_id, got: {err}"
         );
     }
 }

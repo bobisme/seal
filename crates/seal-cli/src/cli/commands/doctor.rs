@@ -6,9 +6,9 @@ use std::path::Path;
 use std::process::Command;
 
 use crate::cli::commands::init::{events_path, index_path, is_initialized, SEAL_DIR};
+use crate::output::{Formatter, OutputFormat};
 use seal_core::events::EventEnvelope;
 use seal_core::log::open_or_create;
-use crate::output::{Formatter, OutputFormat};
 use seal_core::projection::{sync_from_log_with_backup, ProjectionDb};
 use seal_core::scm::{resolve_backend, BackendDetection, ScmPreference};
 use seal_core::version::{detect_version, DataVersion};
@@ -106,13 +106,11 @@ fn check_scm_backend(workspace_root: &Path, scm_preference: ScmPreference) -> Ch
     let git_root = detection
         .git_root
         .as_ref()
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|| "not detected".to_string());
+        .map_or_else(|| "not detected".to_string(), |p| p.display().to_string());
     let jj_root = detection
         .jj_root
         .as_ref()
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|| "not detected".to_string());
+        .map_or_else(|| "not detected".to_string(), |p| p.display().to_string());
 
     if detection.git_root.is_none() && detection.jj_root.is_none() {
         return CheckResult::fail(
@@ -216,7 +214,7 @@ fn check_legacy_events_parseable(repo_root: &Path) -> CheckResult {
             if errors.is_empty() {
                 CheckResult::pass(
                     "events_parseable",
-                    &format!("events.jsonl is valid ({} events)", valid_count),
+                    &format!("events.jsonl is valid ({valid_count} events)"),
                 )
             } else {
                 CheckResult::fail(
@@ -232,7 +230,7 @@ fn check_legacy_events_parseable(repo_root: &Path) -> CheckResult {
         }
         Err(e) => CheckResult::fail(
             "events_parseable",
-            &format!("Cannot read events.jsonl: {}", e),
+            &format!("Cannot read events.jsonl: {e}"),
             "Check file permissions or run 'seal --agent <your-name> init' to recreate",
         ),
     }
@@ -253,7 +251,7 @@ fn check_review_logs_parseable(repo_root: &Path) -> CheckResult {
         Err(e) => {
             return CheckResult::fail(
                 "events_parseable",
-                &format!("Cannot read review logs directory: {}", e),
+                &format!("Cannot read review logs directory: {e}"),
                 "Check file permissions on .seal/reviews",
             );
         }
@@ -314,10 +312,7 @@ fn check_review_logs_parseable(repo_root: &Path) -> CheckResult {
     if errors.is_empty() {
         CheckResult::pass(
             "events_parseable",
-            &format!(
-                "review logs are valid ({} reviews, {} events)",
-                review_count, event_count
-            ),
+            &format!("review logs are valid ({review_count} reviews, {event_count} events)"),
         )
     } else {
         CheckResult::fail(
@@ -343,7 +338,7 @@ fn check_index_sync(repo_root: &Path) -> CheckResult {
             if let Err(e) = db.init_schema() {
                 return CheckResult::fail(
                     "index_sync",
-                    &format!("Failed to initialize schema: {}", e),
+                    &format!("Failed to initialize schema: {e}"),
                     "Delete .seal/index.db and it will be recreated",
                 );
             }
@@ -357,26 +352,25 @@ fn check_index_sync(repo_root: &Path) -> CheckResult {
                     CheckResult::pass(
                         "index_sync",
                         &format!(
-                            "index.db is in sync ({} reviews, {} events)",
-                            review_count, events_processed
+                            "index.db is in sync ({review_count} reviews, {events_processed} events)"
                         ),
                     )
                 }
                 Err(e) => CheckResult::warn(
                     "index_sync",
-                    &format!("Sync completed with warning: {}", e),
+                    &format!("Sync completed with warning: {e}"),
                     Some("This may indicate corrupted events or schema mismatch"),
                 ),
             }
         }
         (Err(e), _) => CheckResult::fail(
             "index_sync",
-            &format!("Cannot open index.db: {}", e),
+            &format!("Cannot open index.db: {e}"),
             "Delete .seal/index.db and it will be recreated on next command",
         ),
         (_, Err(e)) => CheckResult::fail(
             "index_sync",
-            &format!("Cannot open events.jsonl: {}", e),
+            &format!("Cannot open events.jsonl: {e}"),
             "Check file permissions",
         ),
     }

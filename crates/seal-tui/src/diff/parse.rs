@@ -268,14 +268,14 @@ index abc123..def456 100644
 
     #[test]
     fn test_line_numbers() {
-        let diff = r#"--- a/test.txt
+        let diff = r"--- a/test.txt
 +++ b/test.txt
 @@ -10,3 +10,4 @@
  context
 -removed
 +added1
 +added2
-"#;
+";
 
         let parsed = ParsedDiff::parse(diff);
         let lines = &parsed.hunks[0].lines;

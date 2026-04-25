@@ -23,10 +23,11 @@ pub enum DataVersion {
 }
 
 impl DataVersion {
-    pub fn as_u32(&self) -> u32 {
+    #[must_use]
+    pub const fn as_u32(&self) -> u32 {
         match self {
-            DataVersion::V1 => 1,
-            DataVersion::V2 => 2,
+            Self::V1 => 1,
+            Self::V2 => 2,
         }
     }
 }
@@ -73,7 +74,7 @@ pub fn detect_version(seal_root: &Path) -> Result<Option<DataVersion>> {
         return match version_num {
             1 => Ok(Some(DataVersion::V1)),
             2 => Ok(Some(DataVersion::V2)),
-            _ => bail!("Unknown data format version: {}", version_num),
+            _ => bail!("Unknown data format version: {version_num}"),
         };
     }
 

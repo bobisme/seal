@@ -9,8 +9,8 @@ use std::path::Path;
 /// Hard-coded patterns that are always excluded from reviews.
 /// These are excluded regardless of `.sealignore` contents.
 const HARD_IGNORED: &[&str] = &[
-    ".seal/",   // Review metadata - must never be reviewed
-    ".beads/",  // Issue tracking data
+    ".seal/",  // Review metadata - must never be reviewed
+    ".beads/", // Issue tracking data
 ];
 
 /// Result of loading sealignore patterns.
@@ -60,7 +60,9 @@ impl SealIgnore {
             let is_dir = path.ends_with('/');
             // Use matched_path_or_any_parents to handle directory patterns like "target/"
             // which should match "target/debug/binary"
-            gitignore.matched_path_or_any_parents(path, is_dir).is_ignore()
+            gitignore
+                .matched_path_or_any_parents(path, is_dir)
+                .is_ignore()
         } else {
             false
         }
@@ -72,10 +74,7 @@ impl SealIgnore {
     #[must_use]
     pub fn filter_files(&self, files: Vec<String>) -> (Vec<String>, usize) {
         let original_count = files.len();
-        let filtered: Vec<String> = files
-            .into_iter()
-            .filter(|f| !self.is_ignored(f))
-            .collect();
+        let filtered: Vec<String> = files.into_iter().filter(|f| !self.is_ignored(f)).collect();
         let ignored_count = original_count - filtered.len();
         (filtered, ignored_count)
     }

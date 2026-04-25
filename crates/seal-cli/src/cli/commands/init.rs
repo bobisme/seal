@@ -75,8 +75,12 @@ pub fn run_init(repo_root: &Path) -> Result<()> {
 
     // Create reviews directory
     let reviews_dir = seal_dir.join(REVIEWS_DIR);
-    fs::create_dir_all(&reviews_dir)
-        .with_context(|| format!("Failed to create reviews directory: {}", reviews_dir.display()))?;
+    fs::create_dir_all(&reviews_dir).with_context(|| {
+        format!(
+            "Failed to create reviews directory: {}",
+            reviews_dir.display()
+        )
+    })?;
 
     // Write version file
     write_version_file(repo_root, DataVersion::V2)?;
@@ -123,6 +127,7 @@ fn ensure_gitignore(seal_dir: &Path) -> Result<()> {
 /// Check if seal is initialized in the given directory.
 ///
 /// Returns true if either v1 (events.jsonl) or v2 (version file or reviews dir) exists.
+#[must_use]
 pub fn is_initialized(repo_root: &Path) -> bool {
     let seal_dir = repo_root.join(SEAL_DIR);
     if !seal_dir.exists() {
@@ -142,11 +147,13 @@ pub fn is_initialized(repo_root: &Path) -> bool {
 }
 
 /// Get the path to the events file.
+#[must_use]
 pub fn events_path(repo_root: &Path) -> std::path::PathBuf {
     repo_root.join(SEAL_DIR).join(EVENTS_FILE)
 }
 
 /// Get the path to the index database.
+#[must_use]
 pub fn index_path(repo_root: &Path) -> std::path::PathBuf {
     repo_root.join(SEAL_DIR).join("index.db")
 }
@@ -174,8 +181,7 @@ mod tests {
         assert!(!repo_root.join(SEAL_DIR).join(EVENTS_FILE).exists());
 
         // Check version file content
-        let version =
-            std::fs::read_to_string(repo_root.join(SEAL_DIR).join("version")).unwrap();
+        let version = std::fs::read_to_string(repo_root.join(SEAL_DIR).join("version")).unwrap();
         assert_eq!(version.trim(), "2");
 
         // Check gitignore content

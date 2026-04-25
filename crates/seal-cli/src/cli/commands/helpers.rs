@@ -57,6 +57,7 @@ pub fn ensure_initialized(repo_root: &Path) -> Result<()> {
 }
 
 /// Get the path to the .seal directory.
+#[must_use]
 pub fn seal_dir(repo_root: &Path) -> std::path::PathBuf {
     repo_root.join(SEAL_DIR)
 }
@@ -131,8 +132,7 @@ pub fn get_review(seal_root: &Path, review_id: &str) -> Result<ReviewDetail> {
     services.reviews().get(review_id).map_err(|e| {
         if matches!(e, seal_core::core::CoreError::ReviewNotFound { .. }) {
             anyhow::anyhow!(
-                "Review not found: {}\n  To fix: seal --agent <your-name> reviews list",
-                review_id
+                "Review not found: {review_id}\n  To fix: seal --agent <your-name> reviews list"
             )
         } else {
             e.into()
@@ -153,8 +153,7 @@ pub fn get_thread(seal_root: &Path, thread_id: &str) -> Result<ThreadDetail> {
     services.threads().get(thread_id).map_err(|e| {
         if matches!(e, seal_core::core::CoreError::ThreadNotFound { .. }) {
             anyhow::anyhow!(
-                "Thread not found: {}\n  To fix: seal --agent <your-name> threads list <review_id>",
-                thread_id
+                "Thread not found: {thread_id}\n  To fix: seal --agent <your-name> threads list <review_id>"
             )
         } else {
             e.into()
@@ -179,18 +178,18 @@ pub fn resolve_review_thread_commit(scm: &dyn ScmRepo, review: &ReviewDetail) ->
 }
 
 /// Create a "review not found" error.
+#[must_use]
 pub fn review_not_found_error(_seal_root: &Path, review_id: &str) -> anyhow::Error {
     anyhow::anyhow!(
-        "Review not found: {}\n  To fix: seal --agent <your-name> reviews list",
-        review_id
+        "Review not found: {review_id}\n  To fix: seal --agent <your-name> reviews list"
     )
 }
 
 /// Create a "thread not found" error.
+#[must_use]
 pub fn thread_not_found_error(_seal_root: &Path, thread_id: &str) -> anyhow::Error {
     anyhow::anyhow!(
-        "Thread not found: {}\n  To fix: seal --agent <your-name> threads list <review_id>",
-        thread_id
+        "Thread not found: {thread_id}\n  To fix: seal --agent <your-name> threads list <review_id>"
     )
 }
 

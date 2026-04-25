@@ -1,7 +1,7 @@
 //! seal-tui - GitHub-style code review TUI for seal
 //!
 //! Uses Elm Architecture (Model/Message/Update/View) with ftui rendering.
-//! Replaces the standalone botseal-ui with direct SealServices integration.
+//! Replaces the standalone botseal-ui with direct `SealServices` integration.
 
 #![allow(clippy::cast_possible_truncation)]
 #![allow(clippy::cast_sign_loss)]
@@ -232,7 +232,7 @@ pub fn run(repo_root: &Path, services: SealServices) -> Result<()> {
                             raw_guard: &mut raw_guard,
                             wrap_guard: &mut wrap_guard,
                             cursor_guard: &mut cursor_guard,
-                            client: &Some(client.as_ref()),
+                            client: Some(client.as_ref()),
                             repo_path: repo_path.as_deref(),
                             options,
                             terminal_session: &mut terminal_session,
@@ -317,7 +317,7 @@ struct EventContext<'a> {
     raw_guard: &'a mut Option<RawModeGuard>,
     wrap_guard: &'a mut Option<AutoWrapGuard>,
     cursor_guard: &'a mut Option<CursorGuard>,
-    client: &'a Option<&'a dyn SealClient>,
+    client: Option<&'a dyn SealClient>,
     repo_path: Option<&'a Path>,
     options: RendererOptions,
     terminal_session: &'a mut Option<TerminalSession>,

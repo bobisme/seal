@@ -17,6 +17,7 @@ const START_MARKER: &str = "<!-- seal-agent-instructions -->";
 const END_MARKER: &str = "<!-- end-seal-agent-instructions -->";
 
 /// Returns the seal agent instructions text.
+#[must_use]
 pub fn get_crit_instructions() -> String {
     let suggested_name = suggest_agent_name();
 
@@ -30,8 +31,8 @@ This project uses [seal](https://github.com/bobisme/seal) for distributed code r
 Pass `--agent <name>` on every seal command to identify yourself:
 
 ```bash
-seal --agent {name} reviews list
-seal --agent {name} comment <id> --file F --line L "msg"
+seal --agent {suggested_name} reviews list
+seal --agent {suggested_name} comment <id> --file F --line L "msg"
 ```
 
 Alternatively, set `BOTSEAL_AGENT`, `SEAL_AGENT`, `AGENT`, or `BOTBUS_AGENT` env vars (but note these may not persist across tool invocations in some environments).
@@ -43,25 +44,25 @@ In interactive (TTY) sessions, `$USER` is used as a fallback if no agent identit
 All commands require `--agent <name>` (env vars don't persist in sandboxed environments):
 
 ```bash
-seal --agent {name} reviews list                        # List reviews
-seal --agent {name} reviews create --title "..."        # Create review for current change
-seal --agent {name} review <id>                         # Show full review with threads/comments
-seal --agent {name} comment <id> --file F --line L "M"  # Add comment (auto-creates thread)
-seal --agent {name} reply <thread_id> "M"               # Reply to an existing thread
-seal --agent {name} lgtm <id> -m "..."                  # Approve (LGTM)
-seal --agent {name} block <id> -r "..."                 # Request changes
-seal --agent {name} threads resolve <id> --reason "..." # Resolve a thread
-seal --agent {name} reviews mark-merged <id> --self-approve   # Approve + mark merged (solo workflow)
+seal --agent {suggested_name} reviews list                        # List reviews
+seal --agent {suggested_name} reviews create --title "..."        # Create review for current change
+seal --agent {suggested_name} review <id>                         # Show full review with threads/comments
+seal --agent {suggested_name} comment <id> --file F --line L "M"  # Add comment (auto-creates thread)
+seal --agent {suggested_name} reply <thread_id> "M"               # Reply to an existing thread
+seal --agent {suggested_name} lgtm <id> -m "..."                  # Approve (LGTM)
+seal --agent {suggested_name} block <id> -r "..."                 # Request changes
+seal --agent {suggested_name} threads resolve <id> --reason "..." # Resolve a thread
+seal --agent {suggested_name} reviews mark-merged <id> --self-approve   # Approve + mark merged (solo workflow)
 ```
 
 ### Workflow
 
-1. **Review code**: `seal --agent {name} review <id>` or `seal --agent {name} threads list <id> -v`
-2. **Add feedback**: `seal --agent {name} comment <id> --file <path> --line <n> "comment"`
-3. **Reply**: `seal --agent {name} reply <thread_id> "response"` to respond to existing threads
-4. **Vote**: `seal --agent {name} lgtm <id>` or `seal --agent {name} block <id> -r "reason"`
-5. **Resolve threads**: `seal --agent {name} threads resolve <id>` after addressing feedback
-6. **Mark merged**: `seal --agent {name} reviews mark-merged <id>` (fails if blocking votes exist)
+1. **Review code**: `seal --agent {suggested_name} review <id>` or `seal --agent {suggested_name} threads list <id> -v`
+2. **Add feedback**: `seal --agent {suggested_name} comment <id> --file <path> --line <n> "comment"`
+3. **Reply**: `seal --agent {suggested_name} reply <thread_id> "response"` to respond to existing threads
+4. **Vote**: `seal --agent {suggested_name} lgtm <id>` or `seal --agent {suggested_name} block <id> -r "reason"`
+5. **Resolve threads**: `seal --agent {suggested_name} threads resolve <id>` after addressing feedback
+6. **Mark merged**: `seal --agent {suggested_name} reviews mark-merged <id>` (fails if blocking votes exist)
 
 ### Key Points
 
@@ -71,13 +72,12 @@ seal --agent {name} reviews mark-merged <id> --self-approve   # Approve + mark m
 - Use `--json` for machine-parseable output
 - **Identity**: Use `--agent <name>` flag (preferred) or set BOTSEAL_AGENT/SEAL_AGENT/AGENT/BOTBUS_AGENT env var
 - In TTY sessions, `$USER` is used as fallback if no agent identity is set"#,
-        name = suggested_name,
     )
 }
 
 /// Suggest an agent name based on the project directory.
 ///
-/// Priority: SEAL_AGENT > BOTBUS_AGENT > <dirname>-dev
+/// Priority: `SEAL_AGENT` > `BOTBUS_AGENT` > <dirname>-dev
 fn suggest_agent_name() -> String {
     // Check env vars first - don't override an existing identity
     if let Ok(name) = env::var("SEAL_AGENT") {
@@ -95,8 +95,7 @@ fn suggest_agent_name() -> String {
     env::current_dir()
         .ok()
         .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
-        .map(|dir| format!("{}-dev", dir))
-        .unwrap_or_else(|| "my-agent".to_string())
+        .map_or_else(|| "my-agent".to_string(), |dir| format!("{dir}-dev"))
 }
 
 /// Run the `seal agents init` command.
@@ -128,8 +127,10 @@ pub fn run_agents_init(repo_root: &Path) -> Result<()> {
 
     let updated_content = if has_start && has_end {
         // Replace existing block
-        let start_idx = content.find(START_MARKER).unwrap();
-        let end_idx = content.find(END_MARKER).unwrap() + END_MARKER.len();
+        let start_idx = content
+            .find(START_MARKER)
+            .expect("has_start was true above");
+        let end_idx = content.find(END_MARKER).expect("has_end was true above") + END_MARKER.len();
 
         let mut result = String::with_capacity(content.len());
         result.push_str(&content[..start_idx]);
@@ -171,7 +172,6 @@ pub fn run_agents_show() -> Result<()> {
     println!("{}", get_crit_instructions());
     Ok(())
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -230,10 +230,8 @@ mod tests {
         let agents_path = repo_root.join(AGENTS_FILE);
 
         // Create file with existing seal block
-        let existing = format!(
-            "# Header\n\n{}\n\nOld instructions\n\n{}\n\n# Footer\n",
-            START_MARKER, END_MARKER
-        );
+        let existing =
+            format!("# Header\n\n{START_MARKER}\n\nOld instructions\n\n{END_MARKER}\n\n# Footer\n");
         fs::write(&agents_path, &existing).unwrap();
 
         run_agents_init(repo_root).unwrap();
@@ -271,7 +269,7 @@ mod tests {
         // Only start marker, no end marker
         fs::write(
             &agents_path,
-            format!("# Header\n\n{}\n\nBroken", START_MARKER),
+            format!("# Header\n\n{START_MARKER}\n\nBroken"),
         )
         .unwrap();
 

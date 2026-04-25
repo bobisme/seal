@@ -12,7 +12,7 @@ pub struct InboxService<'a> {
 }
 
 impl<'a> InboxService<'a> {
-    pub(crate) fn new(db: &'a ProjectionDb) -> Self {
+    pub(crate) const fn new(db: &'a ProjectionDb) -> Self {
         Self { db }
     }
 
@@ -36,10 +36,7 @@ impl<'a> InboxService<'a> {
     }
 
     /// Get open threads on reviews the agent authored.
-    pub fn open_threads_on_my_reviews(
-        &self,
-        agent: &str,
-    ) -> CoreResult<Vec<OpenThreadOnMyReview>> {
+    pub fn open_threads_on_my_reviews(&self, agent: &str) -> CoreResult<Vec<OpenThreadOnMyReview>> {
         self.db
             .get_open_threads_on_my_reviews(agent)
             .map_err(CoreError::Internal)

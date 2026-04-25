@@ -5,13 +5,13 @@ use chrono::{DateTime, Duration, Utc};
 use std::path::Path;
 
 use crate::cli::commands::helpers::{ensure_initialized, open_services};
-use seal_core::sealignore::{AllFilesIgnoredError, SealIgnore};
-use seal_core::events::VoteType;
 use crate::output::{Formatter, OutputFormat};
+use seal_core::events::VoteType;
 use seal_core::projection::{ReviewDetail, ThreadSummary};
 use seal_core::scm::ScmRepo;
+use seal_core::sealignore::{AllFilesIgnoredError, SealIgnore};
 
-/// Parse a --since value into a DateTime.
+/// Parse a --since value into a `DateTime`.
 /// Supports:
 /// - ISO 8601 timestamps: "2026-01-27T23:00:00Z"
 /// - Relative durations: "1h", "2d", "30m", "1w"
@@ -101,7 +101,7 @@ pub fn run_reviews_create(
     let review_id = services.reviews().create(
         scm,
         title.clone(),
-        description.clone(),
+        description,
         reviewer_list.clone(),
         author,
     )?;
@@ -153,7 +153,10 @@ pub fn run_reviews_list(
     ensure_initialized(seal_root)?;
 
     let services = open_services(seal_root)?;
-    let reviews = services.reviews().list_filtered(status, author, needs_reviewer, has_unresolved)?;
+    let reviews =
+        services
+            .reviews()
+            .list_filtered(status, author, needs_reviewer, has_unresolved)?;
 
     // Build context-aware empty message
     let empty_msg = if needs_reviewer.is_some() {
@@ -213,7 +216,9 @@ pub fn run_reviews_request(
     }
 
     let services = open_services(repo_root)?;
-    services.reviews().request_reviewers(review_id, reviewer_list.clone(), author)?;
+    services
+        .reviews()
+        .request_reviewers(review_id, reviewer_list.clone(), author)?;
 
     let result = serde_json::json!({
         "review_id": review_id,
@@ -275,13 +280,15 @@ pub fn run_reviews_abandon(
     // Verify review exists locally and is not already abandoned/merged
     let review = services.reviews().get(review_id)?;
     if review.status == "abandoned" {
-        bail!("Review is already abandoned: {}", review_id);
+        bail!("Review is already abandoned: {review_id}");
     }
     if review.status == "merged" {
-        bail!("Cannot abandon merged review: {}", review_id);
+        bail!("Cannot abandon merged review: {review_id}");
     }
 
-    services.reviews().abandon(review_id, reason.clone(), author)?;
+    services
+        .reviews()
+        .abandon(review_id, reason.clone(), author)?;
 
     let result = serde_json::json!({
         "review_id": review_id,
@@ -317,15 +324,14 @@ pub fn run_reviews_merge(
     // Verify review exists locally (need to write to its log)
     let review = services.reviews().get(review_id)?;
     if review.status == "merged" {
-        bail!("Review is already merged: {}", review_id);
+        bail!("Review is already merged: {review_id}");
     }
     if review.status == "abandoned" {
-        bail!("Cannot merge abandoned review: {}", review_id);
+        bail!("Cannot merge abandoned review: {review_id}");
     }
     if review.status == "open" && !self_approve {
         bail!(
-            "Cannot merge unapproved review: {}. Approve it first, or use --self-approve.",
-            review_id
+            "Cannot merge unapproved review: {review_id}. Approve it first, or use --self-approve."
         );
     }
     if review.status == "open" && self_approve {
@@ -366,7 +372,9 @@ pub fn run_reviews_merge(
             .context("Failed to get current commit for merge")?,
     };
 
-    services.reviews().mark_merged(review_id, final_commit.clone(), author)?;
+    services
+        .reviews()
+        .mark_merged(review_id, final_commit.clone(), author)?;
 
     let result = serde_json::json!({
         "review_id": review_id,
@@ -435,29 +443,33 @@ fn run_vote(
     // receive votes, e.g., to change a block to lgtm after issues are fixed)
     let review = services.reviews().get(review_id)?;
     if review.status == "merged" {
-        bail!("Cannot vote on merged review: {}", review_id);
+        bail!("Cannot vote on merged review: {review_id}");
     }
     if review.status == "abandoned" {
-        bail!("Cannot vote on abandoned review: {}", review_id);
+        bail!("Cannot vote on abandoned review: {review_id}");
     }
-    let review_status = review.status.clone();
+    let review_status = review.status;
 
     // Resolve author identity for output and auto-approve check
     let author_str = seal_core::events::get_agent_identity(author)?;
 
-    services.reviews().vote(review_id, vote.clone(), reason.clone(), author)?;
+    services
+        .reviews()
+        .vote(review_id, vote, reason.clone(), author)?;
 
     // Auto-approve on LGTM if review is open and no blocking votes from others
     let auto_approved = if vote == VoteType::Lgtm && review_status == "open" {
         // Re-sync to see our newly recorded vote
         let services = open_services(repo_root)?;
-        let has_blocks = services.db().has_blocking_votes_from_others(review_id, &author_str)?;
-        if !has_blocks {
+        let has_blocks = services
+            .db()
+            .has_blocking_votes_from_others(review_id, &author_str)?;
+        if has_blocks {
+            false
+        } else {
             // Auto-approve the review
             services.reviews().approve(review_id, author)?;
             true
-        } else {
-            false
         }
     } else {
         false
@@ -610,7 +622,7 @@ pub fn run_review(
     );
 
     if let Some(desc) = &review.description {
-        println!("\n  {}", desc);
+        println!("\n  {desc}");
     }
 
     // Show votes if any
@@ -655,10 +667,7 @@ pub fn run_review(
         if include_diffs {
             print_file_diffs_text(scm, &review, &threads, &commit_ref, &file_cache, seal_root);
         } else {
-            println!(
-                "\n  No threads yet. Use seal diff {} to view changes.",
-                review_id
-            );
+            println!("\n  No threads yet. Use seal diff {review_id} to view changes.");
         }
         return Ok(());
     }
@@ -710,7 +719,7 @@ pub fn run_review(
     }
 
     for (file, file_threads) in threads_by_file {
-        println!("\n━━━ {} ━━━", file);
+        println!("\n━━━ {file} ━━━");
 
         for (thread, comments) in file_threads {
             let status_icon = if thread.status == "open" {
@@ -751,7 +760,7 @@ pub fn run_review(
                 ) {
                     // Indent the context
                     for line in format_context(&ctx).lines() {
-                        println!("  {}", line);
+                        println!("  {line}");
                     }
                 }
             }
@@ -764,14 +773,14 @@ pub fn run_review(
                     &comment.created_at[..10]
                 );
                 for line in comment.body.lines() {
-                    println!("       {}", line);
+                    println!("       {line}");
                 }
             }
         }
     }
 
-    if let Some(_) = since {
-        println!("\n  [{} new comment(s)]", total_new_comments);
+    if since.is_some() {
+        println!("\n  [{total_new_comments} new comment(s)]");
     }
 
     if include_diffs {
@@ -807,21 +816,21 @@ fn print_file_diffs_text(
             .and_then(serde_json::Value::as_str)
             .unwrap_or("<unknown>");
 
-        println!("\n━━━ {} (diff) ━━━", path);
+        println!("\n━━━ {path} (diff) ━━━");
 
         if let Some(diff_text) = file.get("diff").and_then(serde_json::Value::as_str) {
             if diff_text.trim().is_empty() {
                 println!("  (no textual diff)");
             } else {
                 for line in diff_text.lines() {
-                    println!("  {}", line);
+                    println!("  {line}");
                 }
             }
             continue;
         }
 
         if let Some(content) = file.get("content") {
-            println!("  no diff available; content window: {}", content);
+            println!("  no diff available; content window: {content}");
         } else {
             println!("  (no diff available)");
         }
@@ -1011,7 +1020,7 @@ fn build_file_diffs(
     // All files: union of files with threads and files with diffs, filtered by sealignore
     let sealignore = SealIgnore::load(seal_root);
     let all_files: Vec<String> = {
-        let mut files = files_with_threads.clone();
+        let mut files = files_with_threads;
         for key in diffs_by_file.keys() {
             files.insert((*key).to_string());
         }
@@ -1024,7 +1033,9 @@ fn build_file_diffs(
     let mut file_entries = Vec::new();
 
     for file_path in &all_files {
-        let diff = diffs_by_file.get(file_path.as_str()).map(|s| s.to_string());
+        let diff = diffs_by_file
+            .get(file_path.as_str())
+            .map(std::string::ToString::to_string);
 
         // Get threads for this file
         let file_threads: Vec<&ThreadSummary> = threads
@@ -1033,25 +1044,23 @@ fn build_file_diffs(
             .collect();
 
         // Check for orphaned threads (selection_start not in any diff hunk)
-        let content = if !file_threads.is_empty() {
-            if let Some(ref diff_text) = diff {
-                let hunks = parse_hunk_ranges(diff_text);
-                let has_orphan = file_threads.iter().any(|t| {
-                    let line = t.selection_start as u32;
-                    !hunks.iter().any(|h| line >= h.0 && line <= h.1)
-                });
+        let content = if file_threads.is_empty() {
+            None
+        } else if let Some(ref diff_text) = diff {
+            let hunks = parse_hunk_ranges(diff_text);
+            let has_orphan = file_threads.iter().any(|t| {
+                let line = t.selection_start as u32;
+                !hunks.iter().any(|h| line >= h.0 && line <= h.1)
+            });
 
-                if has_orphan {
-                    build_content_window_from_cache(file_cache, file_path, &file_threads)
-                } else {
-                    None
-                }
-            } else {
-                // No diff at all — all threads are orphaned
+            if has_orphan {
                 build_content_window_from_cache(file_cache, file_path, &file_threads)
+            } else {
+                None
             }
         } else {
-            None
+            // No diff at all — all threads are orphaned
+            build_content_window_from_cache(file_cache, file_path, &file_threads)
         };
 
         file_entries.push(serde_json::json!({
@@ -1127,9 +1136,7 @@ fn parse_hunk_ranges(diff: &str) -> Vec<(u32, u32)> {
         // or:     @@ -old_start,old_count +new_start @@
         if let Some(plus_pos) = line.find('+') {
             let after_plus = &line[plus_pos + 1..];
-            let end = after_plus
-                .find(|c: char| c == ' ' || c == '@')
-                .unwrap_or(after_plus.len());
+            let end = after_plus.find([' ', '@']).unwrap_or(after_plus.len());
             let range_str = &after_plus[..end];
 
             if let Some((start_str, count_str)) = range_str.split_once(',') {

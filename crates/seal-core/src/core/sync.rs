@@ -1,6 +1,8 @@
 //! Sync service — sync projection, rebuild, accept regression.
 
-use crate::projection::{rebuild_from_review_logs, sync_from_review_logs, ProjectionDb, SyncReport};
+use crate::projection::{
+    rebuild_from_review_logs, sync_from_review_logs, ProjectionDb, SyncReport,
+};
 
 use super::{CoreContext, CoreError, CoreResult};
 
@@ -11,7 +13,7 @@ pub struct SyncService<'a> {
 }
 
 impl<'a> SyncService<'a> {
-    pub(crate) fn new(ctx: &'a CoreContext, db: &'a ProjectionDb) -> Self {
+    pub(crate) const fn new(ctx: &'a CoreContext, db: &'a ProjectionDb) -> Self {
         Self { ctx, db }
     }
 

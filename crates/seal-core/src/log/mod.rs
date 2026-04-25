@@ -20,13 +20,13 @@ use fs2::FileExt;
 use crate::events::EventEnvelope;
 
 /// FNV-1a hash over byte slices. Output is stable across Rust versions
-/// (unlike `DefaultHasher` which uses randomized SipHash keys).
+/// (unlike `DefaultHasher` which uses randomized `SipHash` keys).
 fn fnv1a_hash(data: &[u8]) -> u64 {
-    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
-    const FNV_PRIME: u64 = 0x00000100000001B3;
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01B3;
     let mut hash = FNV_OFFSET;
     for &byte in data {
-        hash ^= byte as u64;
+        hash ^= u64::from(byte);
         hash = hash.wrapping_mul(FNV_PRIME);
     }
     hash
@@ -82,7 +82,7 @@ pub struct FileLog {
 }
 
 impl FileLog {
-    /// Create a new FileLog pointing to the given path.
+    /// Create a new `FileLog` pointing to the given path.
     ///
     /// Does not create the file; use `open_or_create` for that.
     pub fn new(path: impl Into<PathBuf>) -> Self {
@@ -90,6 +90,7 @@ impl FileLog {
     }
 
     /// Get the path to the log file.
+    #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -115,7 +116,7 @@ impl AppendLog for FileLog {
             .context("Failed to seek to end of file")?;
 
         // Write the JSON line with newline
-        writeln!(file, "{}", json_line).context("Failed to write event to log")?;
+        writeln!(file, "{json_line}").context("Failed to write event to log")?;
 
         // Flush to ensure data is written
         file.flush().context("Failed to flush log file")?;
@@ -153,8 +154,8 @@ impl AppendLog for FileLog {
                 continue;
             }
 
-            let line_content = line_result
-                .with_context(|| format!("Failed to read line {} from log file", idx))?;
+            let line_content =
+                line_result.with_context(|| format!("Failed to read line {idx} from log file"))?;
 
             // Skip empty lines
             if line_content.trim().is_empty() {
@@ -162,7 +163,7 @@ impl AppendLog for FileLog {
             }
 
             let event = EventEnvelope::from_json_line(&line_content)
-                .with_context(|| format!("Failed to parse event at line {}", idx))?;
+                .with_context(|| format!("Failed to parse event at line {idx}"))?;
 
             events.push(event);
         }
@@ -190,7 +191,7 @@ impl AppendLog for FileLog {
         let reader = BufReader::new(file);
         let count = reader
             .lines()
-            .filter_map(|l| l.ok())
+            .filter_map(std::result::Result::ok)
             .filter(|l| !l.trim().is_empty())
             .count();
 
@@ -213,7 +214,7 @@ impl AppendLog for FileLog {
             .context("Failed to acquire shared lock")?;
 
         let reader = BufReader::new(file);
-        let count = reader.lines().filter_map(|l| l.ok()).count();
+        let count = reader.lines().filter_map(std::result::Result::ok).count();
 
         Ok(count)
     }
@@ -238,18 +239,18 @@ impl AppendLog for FileLog {
             .context("Failed to acquire shared lock")?;
 
         let reader = BufReader::new(file);
-        let mut hash: u64 = 0xcbf29ce484222325; // FNV offset basis
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325; // FNV offset basis
 
         for (idx, line_result) in reader.lines().enumerate() {
             if idx >= n {
                 break;
             }
             let line =
-                line_result.with_context(|| format!("Failed to read line {} for hashing", idx))?;
+                line_result.with_context(|| format!("Failed to read line {idx} for hashing"))?;
             hash = fnv1a_hash(line.as_bytes()).wrapping_add(hash.wrapping_mul(31));
         }
 
-        Ok(Some(format!("{:016x}", hash)))
+        Ok(Some(format!("{hash:016x}")))
     }
 }
 
@@ -281,11 +282,13 @@ pub fn open_or_create(path: &Path) -> Result<FileLog> {
 // ============================================================================
 
 /// Path to the reviews directory within .seal/
+#[must_use]
 pub fn reviews_dir(seal_root: &Path) -> PathBuf {
     seal_root.join(".seal").join("reviews")
 }
 
 /// Path to a specific review's event log.
+#[must_use]
 pub fn review_events_path(seal_root: &Path, review_id: &str) -> PathBuf {
     reviews_dir(seal_root).join(review_id).join("events.jsonl")
 }
@@ -324,7 +327,7 @@ pub struct ReviewLog {
 }
 
 impl ReviewLog {
-    /// Create a new ReviewLog for the given review.
+    /// Create a new `ReviewLog` for the given review.
     ///
     /// Returns an error if `review_id` contains path separators or other
     /// unsafe characters that could escape the reviews directory.
@@ -338,11 +341,13 @@ impl ReviewLog {
     }
 
     /// Get the path to this review's event log.
+    #[must_use]
     pub fn path(&self) -> PathBuf {
         review_events_path(&self.seal_root, &self.review_id)
     }
 
     /// Get the review ID.
+    #[must_use]
     pub fn review_id(&self) -> &str {
         &self.review_id
     }
@@ -392,7 +397,7 @@ impl AppendLog for ReviewLog {
         file.seek(SeekFrom::End(0))
             .context("Failed to seek to end of file")?;
 
-        writeln!(file, "{}", json_line).context("Failed to write event to log")?;
+        writeln!(file, "{json_line}").context("Failed to write event to log")?;
 
         file.flush().context("Failed to flush log file")?;
 
@@ -415,15 +420,15 @@ impl AppendLog for ReviewLog {
         let mut events = Vec::new();
 
         for (idx, line_result) in reader.lines().enumerate() {
-            let line_content = line_result
-                .with_context(|| format!("Failed to read line {} from log file", idx))?;
+            let line_content =
+                line_result.with_context(|| format!("Failed to read line {idx} from log file"))?;
 
             if line_content.trim().is_empty() {
                 continue;
             }
 
             let event = EventEnvelope::from_json_line(&line_content)
-                .with_context(|| format!("Failed to parse event at line {}", idx))?;
+                .with_context(|| format!("Failed to parse event at line {idx}"))?;
 
             events.push(event);
         }
@@ -451,15 +456,15 @@ impl AppendLog for ReviewLog {
                 continue;
             }
 
-            let line_content = line_result
-                .with_context(|| format!("Failed to read line {} from log file", idx))?;
+            let line_content =
+                line_result.with_context(|| format!("Failed to read line {idx} from log file"))?;
 
             if line_content.trim().is_empty() {
                 continue;
             }
 
             let event = EventEnvelope::from_json_line(&line_content)
-                .with_context(|| format!("Failed to parse event at line {}", idx))?;
+                .with_context(|| format!("Failed to parse event at line {idx}"))?;
 
             events.push(event);
         }
@@ -482,7 +487,7 @@ impl AppendLog for ReviewLog {
         let reader = BufReader::new(file);
         let count = reader
             .lines()
-            .filter_map(|l| l.ok())
+            .filter_map(std::result::Result::ok)
             .filter(|l| !l.trim().is_empty())
             .count();
 
@@ -502,7 +507,7 @@ impl AppendLog for ReviewLog {
             .context("Failed to acquire shared lock")?;
 
         let reader = BufReader::new(file);
-        let count = reader.lines().filter_map(|l| l.ok()).count();
+        let count = reader.lines().filter_map(std::result::Result::ok).count();
 
         Ok(count)
     }
@@ -524,18 +529,18 @@ impl AppendLog for ReviewLog {
             .context("Failed to acquire shared lock")?;
 
         let reader = BufReader::new(file);
-        let mut hash: u64 = 0xcbf29ce484222325; // FNV offset basis
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325; // FNV offset basis
 
         for (idx, line_result) in reader.lines().enumerate() {
             if idx >= n {
                 break;
             }
             let line =
-                line_result.with_context(|| format!("Failed to read line {} for hashing", idx))?;
+                line_result.with_context(|| format!("Failed to read line {idx} for hashing"))?;
             hash = fnv1a_hash(line.as_bytes()).wrapping_add(hash.wrapping_mul(31));
         }
 
-        Ok(Some(format!("{:016x}", hash)))
+        Ok(Some(format!("{hash:016x}")))
     }
 }
 
@@ -616,7 +621,7 @@ mod tests {
                 scm_kind: Some("jj".to_string()),
                 scm_anchor: Some("change123".to_string()),
                 initial_commit: "commit456".to_string(),
-                title: format!("Test Review {}", id),
+                title: format!("Test Review {id}"),
                 description: None,
             }),
         )
@@ -680,8 +685,7 @@ mod tests {
 
         // Append 5 events
         for i in 1..=5 {
-            log.append(&make_test_event(&format!("cr-{:03}", i)))
-                .unwrap();
+            log.append(&make_test_event(&format!("cr-{i:03}"))).unwrap();
         }
 
         // Read from offset 2 (should get events 3, 4, 5)
@@ -981,7 +985,7 @@ mod tests {
         assert!(ReviewLog::new(seal_root, "").is_err());
     }
 
-    /// Verify prefix_hash produces identical output for identical input (bd-2ji).
+    /// Verify `prefix_hash` produces identical output for identical input (bd-2ji).
     #[test]
     fn test_prefix_hash_is_deterministic() {
         let dir = tempdir().unwrap();
@@ -1020,12 +1024,12 @@ mod tests {
         );
     }
 
-    /// Verify fnv1a_hash produces known stable values (bd-2ji).
+    /// Verify `fnv1a_hash` produces known stable values (bd-2ji).
     #[test]
     fn test_fnv1a_known_values() {
         // FNV-1a of empty input is the offset basis
-        assert_eq!(fnv1a_hash(b""), 0xcbf29ce484222325);
+        assert_eq!(fnv1a_hash(b""), 0xcbf2_9ce4_8422_2325);
         // FNV-1a of "a" — well-known test vector
-        assert_eq!(fnv1a_hash(b"a"), 0xaf63dc4c8601ec8c);
+        assert_eq!(fnv1a_hash(b"a"), 0xaf63_dc4c_8601_ec8c);
     }
 }

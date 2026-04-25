@@ -89,7 +89,7 @@ fn should_emit_warning_once(key: String) -> bool {
     let emitted = EMITTED_WARNING_KEYS.get_or_init(|| Mutex::new(HashSet::new()));
     let mut emitted = emitted
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     emitted.insert(key)
 }
 
@@ -98,9 +98,10 @@ fn emit_orphaned_reviews_warning(seal_root: Option<&Path>, review_ids: &[String]
         return;
     }
 
-    let repo_key = seal_root
-        .map(|path| path.display().to_string())
-        .unwrap_or_else(|| "<unknown>".to_string());
+    let repo_key = seal_root.map_or_else(
+        || "<unknown>".to_string(),
+        |path| path.display().to_string(),
+    );
     let key = format!("orphaned-reviews:{repo_key}");
     if !should_emit_warning_once(key) {
         return;
@@ -450,8 +451,7 @@ pub fn sync_from_log_with_backup(
         // Check 1: Truncation — file has fewer lines than our sync cursor.
         if last_line > total {
             eprintln!(
-                "WARNING: events.jsonl truncated (expected >={} lines, found {}). Rebuilding projection.",
-                last_line, total
+                "WARNING: events.jsonl truncated (expected >={last_line} lines, found {total}). Rebuilding projection."
             );
             return rebuild_projection_with_orphan_detection(db, log, seal_dir);
         }
@@ -462,8 +462,7 @@ pub fn sync_from_log_with_backup(
             if let Some(ref actual) = log.prefix_hash(last_line)? {
                 if expected != actual {
                     eprintln!(
-                        "WARNING: events.jsonl content changed (hash mismatch at line {}). Rebuilding projection.",
-                        last_line
+                        "WARNING: events.jsonl content changed (hash mismatch at line {last_line}). Rebuilding projection."
                     );
                     return rebuild_projection_with_orphan_detection(db, log, seal_dir);
                 }
@@ -639,7 +638,7 @@ fn rebuild_projection_with_orphan_detection(
 
         if let Some(dir) = seal_dir {
             let timestamp = Utc::now().format("%Y%m%d-%H%M%S");
-            let backup_path = dir.join(format!("orphaned-reviews-{}.json", timestamp));
+            let backup_path = dir.join(format!("orphaned-reviews-{timestamp}.json"));
 
             // Gather detailed info about orphaned reviews
             let mut orphan_details: Vec<serde_json::Value> = Vec::new();
@@ -946,7 +945,10 @@ pub fn sync_from_review_logs(db: &ProjectionDb, seal_root: &Path) -> Result<Sync
 
     // Step 2: Discover files on disk
     let on_disk_ids = list_review_ids(seal_root)?;
-    let on_disk_set: HashSet<&str> = on_disk_ids.iter().map(|s| s.as_str()).collect();
+    let on_disk_set: HashSet<&str> = on_disk_ids
+        .iter()
+        .map(std::string::String::as_str)
+        .collect();
 
     // Step 3: Process each file
     for review_id in &on_disk_ids {
@@ -1060,7 +1062,7 @@ pub fn sync_from_review_logs(db: &ProjectionDb, seal_root: &Path) -> Result<Sync
     }
 
     // Step 4: Check for disappeared files
-    for (review_id, _) in &stored_states {
+    for review_id in stored_states.keys() {
         if !on_disk_set.contains(review_id.as_str()) {
             report.anomalies.push(SyncAnomaly {
                 review_id: review_id.clone(),
@@ -2514,7 +2516,7 @@ mod tests {
         append_raw(&log_path, "\n"); // empty line at idx 2
         let lgtm = make_lgtm_vote("cr-001", "reviewer-a");
         let lgtm_json = lgtm.to_json_line().unwrap();
-        append_raw(&log_path, &format!("{}\n", lgtm_json)); // lgtm at idx 3
+        append_raw(&log_path, &format!("{lgtm_json}\n")); // lgtm at idx 3
 
         // Sync: should pick up lgtm despite empty line
         let count = sync_from_log(&db, &log).unwrap();
@@ -2728,9 +2730,7 @@ mod tests {
                     assert_eq!(
                         vote,
                         Some("lgtm".to_string()),
-                        "After syncing first lgtm, DB should show lgtm (was: {:?}) [{}]",
-                        vote,
-                        desc
+                        "After syncing first lgtm, DB should show lgtm (was: {vote:?}) [{desc}]"
                     );
                     assert!(
                         !db.has_blocking_votes("cr-fjf9").unwrap(),
@@ -3058,9 +3058,10 @@ mod tests {
         // jj restore brings in a version with MORE events (block + lgtm)
         let block = make_block_vote("cr-001", "reviewer-a", "Needs fixes");
         let lgtm = make_lgtm_vote("cr-001", "reviewer-a");
+        use std::fmt::Write as _;
         let mut content = format!("{}\n", review.to_json_line().unwrap());
-        content.push_str(&format!("{}\n", block.to_json_line().unwrap()));
-        content.push_str(&format!("{}\n", lgtm.to_json_line().unwrap()));
+        writeln!(content, "{}", block.to_json_line().unwrap()).unwrap();
+        writeln!(content, "{}", lgtm.to_json_line().unwrap()).unwrap();
         write_raw(&log_path, &content);
 
         // Sync should pick up new events from line 1 onwards
@@ -3361,7 +3362,7 @@ mod tests {
         // === Phase 4: Verify backup file was created ===
         let backup_files: Vec<_> = std::fs::read_dir(seal_dir)
             .unwrap()
-            .filter_map(|e| e.ok())
+            .filter_map(std::result::Result::ok)
             .filter(|e| {
                 e.file_name()
                     .to_string_lossy()
@@ -4057,7 +4058,7 @@ mod tests {
         let path = log.path();
         let content = std::fs::read_to_string(&path).unwrap();
         let first_line = content.lines().next().unwrap();
-        std::fs::write(&path, format!("{}\n", first_line)).unwrap();
+        std::fs::write(&path, format!("{first_line}\n")).unwrap();
 
         // Re-sync: should detect shrinkage, skip file, preserve data
         let report2 = sync_from_review_logs(&db, seal_root).unwrap();

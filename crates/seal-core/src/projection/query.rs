@@ -207,7 +207,10 @@ impl ProjectionDb {
 
         sql.push_str(" ORDER BY v.created_at DESC");
 
-        let params: Vec<&dyn rusqlite::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
+        let params: Vec<&dyn rusqlite::ToSql> = param_values
+            .iter()
+            .map(std::convert::AsRef::as_ref)
+            .collect();
 
         let mut stmt = self
             .conn
@@ -275,7 +278,7 @@ impl ProjectionDb {
                  LEFT JOIN v_reviews_summary s ON s.review_id = r.review_id
                  WHERE r.review_id = ?",
                 params![review_id],
-                |row| ReviewDetailRow::from_row(row),
+                ReviewDetailRow::from_row,
             )
             .optional()
             .context("Failed to query review")?;
@@ -351,7 +354,10 @@ impl ProjectionDb {
 
         sql.push_str(" ORDER BY file_path, selection_start");
 
-        let params: Vec<&dyn rusqlite::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
+        let params: Vec<&dyn rusqlite::ToSql> = param_values
+            .iter()
+            .map(std::convert::AsRef::as_ref)
+            .collect();
 
         let mut stmt = self
             .conn
@@ -422,7 +428,7 @@ impl ProjectionDb {
                  FROM threads
                  WHERE thread_id = ?",
                 params![thread_id],
-                |row| ThreadDetailRow::from_row(row),
+                ThreadDetailRow::from_row,
             )
             .optional()
             .context("Failed to query thread")?;

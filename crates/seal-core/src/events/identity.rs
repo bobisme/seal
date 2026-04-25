@@ -8,7 +8,7 @@ use std::env;
 use std::io::IsTerminal;
 
 /// Environment variables checked for agent identity, in priority order.
-/// Legacy BOTCRIT_AGENT and CRIT_AGENT are accepted for backward compatibility.
+/// Legacy `BOTCRIT_AGENT` and `CRIT_AGENT` are accepted for backward compatibility.
 const IDENTITY_VARS: &[&str] = &[
     "BOTSEAL_AGENT",
     "SEAL_AGENT",
@@ -22,10 +22,10 @@ const IDENTITY_VARS: &[&str] = &[
 ///
 /// Resolution order:
 /// 1. Explicit override (`--agent`)
-/// 2. BOTSEAL_AGENT environment variable
-/// 3. SEAL_AGENT environment variable
+/// 2. `BOTSEAL_AGENT` environment variable
+/// 3. `SEAL_AGENT` environment variable
 /// 4. AGENT environment variable
-/// 5. BOTBUS_AGENT environment variable
+/// 5. `BOTBUS_AGENT` environment variable
 /// 6. $USER (only when stdin is a TTY)
 ///
 /// Returns error if no identity can be determined.

@@ -227,20 +227,6 @@ fn take_tail_chars(text: &str, max_chars: usize) -> &str {
     text
 }
 
-#[cfg(test)]
-mod tests {
-    use super::truncate_path;
-
-    #[test]
-    fn truncate_path_keeps_tail_directories() {
-        let path = "crates/wraith-diff/src/render/some_file.rs";
-        let truncated = truncate_path(path, 24);
-
-        assert!(truncated.ends_with("some_file.rs"));
-        assert!(truncated.contains("render") || truncated.contains("…/"));
-    }
-}
-
 /// A line of content within a block.
 pub struct BlockLine<'a> {
     pub text: &'a str,
@@ -466,5 +452,19 @@ pub fn draw_help_bar_ext(
         x += 1;
         buffer_draw_text(buffer, x, y, hint.key, bright);
         x += hint.key.len() as u32;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::truncate_path;
+
+    #[test]
+    fn truncate_path_keeps_tail_directories() {
+        let path = "crates/wraith-diff/src/render/some_file.rs";
+        let truncated = truncate_path(path, 24);
+
+        assert!(truncated.ends_with("some_file.rs"));
+        assert!(truncated.contains("render") || truncated.contains("…/"));
     }
 }

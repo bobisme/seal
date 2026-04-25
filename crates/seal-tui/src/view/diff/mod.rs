@@ -223,7 +223,7 @@ impl StreamCursor<'_> {
         self.area.height.saturating_sub(self.screen_row as u32) as usize
     }
 
-    /// Record the current stream_row as a valid cursor stop.
+    /// Record the current `stream_row` as a valid cursor stop.
     fn mark_cursor_stop(&self) {
         self.cursor_stops.borrow_mut().push(self.stream_row);
     }
@@ -427,11 +427,11 @@ fn render_description_block(
             let bar_style = Style::fg(theme.background).with_bg(block_bg);
             let rc = block.x + block.width.saturating_sub(1);
             let rc2 = block.x + block.width.saturating_sub(2);
+            buffer_fill_rect(buf, area.x, y, area.width, 1, theme.background);
             if row < top_margin {
-                buffer_fill_rect(buf, area.x, y, area.width, 1, theme.background);
+                // Background only.
             } else if row == top_margin {
                 // Top border:  ▛▀…▀▜
-                buffer_fill_rect(buf, area.x, y, area.width, 1, theme.background);
                 buffer_fill_rect(
                     buf,
                     block.x + 1,
@@ -447,7 +447,6 @@ fn render_description_block(
                 buffer_draw_text(buf, rc2, y, "▜", border_style);
             } else if row < content_start {
                 // Padding rows: ▌▌ ... ▐▐
-                buffer_fill_rect(buf, area.x, y, area.width, 1, theme.background);
                 buffer_fill_rect(buf, block.x, y, block.width, 1, block_bg);
                 buffer_draw_text(buf, block.x, y, "▌", bar_style);
                 buffer_draw_text(buf, block.x + 1, y, "▌", bar_style);
@@ -455,7 +454,6 @@ fn render_description_block(
                 buffer_draw_text(buf, rc, y, "▐", bar_style);
             } else if row < content_end {
                 // Content rows: ▌▌ text ▐▐
-                buffer_fill_rect(buf, area.x, y, area.width, 1, theme.background);
                 buffer_fill_rect(buf, block.x, y, block.width, 1, block_bg);
                 buffer_draw_text(buf, block.x, y, "▌", bar_style);
                 buffer_draw_text(buf, block.x + 1, y, "▌", bar_style);
@@ -493,7 +491,6 @@ fn render_description_block(
                     }
                 }
             } else if row < content_end + BLOCK_PADDING {
-                buffer_fill_rect(buf, area.x, y, area.width, 1, theme.background);
                 if row == content_end + BLOCK_PADDING - 1 {
                     // Bottom border:  ▙▄…▄▟
                     buffer_fill_rect(
@@ -516,8 +513,6 @@ fn render_description_block(
                     buffer_draw_text(buf, rc2, y, "▐", bar_style);
                     buffer_draw_text(buf, rc, y, "▐", bar_style);
                 }
-            } else {
-                buffer_fill_rect(buf, area.x, y, area.width, 1, theme.background);
             }
         });
     }

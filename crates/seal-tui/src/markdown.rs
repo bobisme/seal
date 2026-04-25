@@ -24,7 +24,7 @@ pub enum MarkdownStyle {
 
 impl MarkdownStyle {
     #[must_use]
-    pub fn style(self, theme: &Theme, bg: Rgba) -> Style {
+    pub const fn style(self, theme: &Theme, bg: Rgba) -> Style {
         match self {
             Self::Body | Self::List | Self::Code => theme.style_foreground_on(bg),
             Self::Heading => theme.style_primary_on(bg).with_bold(),
@@ -71,7 +71,7 @@ pub struct MarkdownLine {
 
 impl MarkdownLine {
     #[must_use]
-    pub fn plain(text: String, style: MarkdownStyle) -> Self {
+    pub const fn plain(text: String, style: MarkdownStyle) -> Self {
         Self {
             content: MarkdownContent::Text(text),
             style,
@@ -136,7 +136,7 @@ pub fn render_markdown_with_highlighter(
                     highlighter.for_fence_info((!fence_info.is_empty()).then_some(fence_info));
                 if !fence_info.is_empty() {
                     lines.push(MarkdownLine::plain(
-                        format!("[{}]", fence_info),
+                        format!("[{fence_info}]"),
                         MarkdownStyle::CodeMeta,
                     ));
                 }
@@ -358,13 +358,15 @@ fn parse_inline_markdown(text: &str) -> MarkdownContent {
     let mut code = false;
 
     while i < chars.len() {
-        if i + 1 < chars.len() && chars[i] == '*' && chars[i + 1] == '*' {
-            if bold || (!code && has_token_ahead(&chars, i + 2, "**")) {
-                push_span(&mut spans, &mut current, bold || emphasis, code);
-                bold = !bold;
-                i += 2;
-                continue;
-            }
+        if i + 1 < chars.len()
+            && chars[i] == '*'
+            && chars[i + 1] == '*'
+            && (bold || (!code && has_token_ahead(&chars, i + 2, "**")))
+        {
+            push_span(&mut spans, &mut current, bold || emphasis, code);
+            bold = !bold;
+            i += 2;
+            continue;
         }
 
         if chars[i] == '`' && (code || has_char_ahead(&chars, i + 1, '`')) {
@@ -398,10 +400,10 @@ fn parse_inline_markdown(text: &str) -> MarkdownContent {
         .map(|span| span.text.as_str())
         .collect::<String>();
     let any_style = spans.iter().any(|span| span.bold || span.code);
-    if !any_style {
-        MarkdownContent::Text(fallback)
-    } else {
+    if any_style {
         MarkdownContent::Styled { spans, fallback }
+    } else {
+        MarkdownContent::Text(fallback)
     }
 }
 
@@ -526,7 +528,7 @@ fn parse_list_item(line: &str) -> Option<(String, String, String)> {
         }
     }
 
-    let digit_count = trimmed.chars().take_while(|ch| ch.is_ascii_digit()).count();
+    let digit_count = trimmed.chars().take_while(char::is_ascii_digit).count();
     if digit_count == 0 {
         return None;
     }

@@ -27,7 +27,7 @@ pub struct CommentService<'a> {
 }
 
 impl<'a> CommentService<'a> {
-    pub(crate) fn new(ctx: &'a CoreContext, db: &'a ProjectionDb) -> Self {
+    pub(crate) const fn new(ctx: &'a CoreContext, db: &'a ProjectionDb) -> Self {
         Self { ctx, db }
     }
 
@@ -49,7 +49,11 @@ impl<'a> CommentService<'a> {
             })?;
 
         // Verify review is open or approved
-        if let Some(review) = self.db.get_review(&thread.review_id).map_err(CoreError::Internal)? {
+        if let Some(review) = self
+            .db
+            .get_review(&thread.review_id)
+            .map_err(CoreError::Internal)?
+        {
             if review.status != "open" && review.status != "approved" {
                 return Err(CoreError::InvalidReviewStatus {
                     review_id: thread.review_id.clone(),
@@ -126,45 +130,42 @@ impl<'a> CommentService<'a> {
         }
 
         let author_str = get_agent_identity(author).map_err(CoreError::Internal)?;
-        let start_line = selection.start_line() as i64;
+        let start_line = i64::from(selection.start_line());
 
         // Check for existing thread at this location
-        let (thread_id, comment_number, thread_created) = match self
+        let (thread_id, comment_number, thread_created) = if let Some(existing_id) = self
             .db
             .find_thread_at_location(review_id, file_path, start_line)
             .map_err(CoreError::Internal)?
         {
-            Some(existing_id) => {
-                let comment_number = self
-                    .db
-                    .get_next_comment_number(&existing_id)
-                    .map_err(CoreError::Internal)?
-                    .ok_or_else(|| CoreError::ThreadNotFound {
-                        thread_id: existing_id.clone(),
-                    })?;
-                (existing_id, comment_number, false)
-            }
-            None => {
-                // Create new thread
-                let new_thread_id = new_thread_id();
+            let comment_number = self
+                .db
+                .get_next_comment_number(&existing_id)
+                .map_err(CoreError::Internal)?
+                .ok_or_else(|| CoreError::ThreadNotFound {
+                    thread_id: existing_id.clone(),
+                })?;
+            (existing_id, comment_number, false)
+        } else {
+            // Create new thread
+            let new_thread_id = new_thread_id();
 
-                let thread_event = EventEnvelope::new(
-                    &author_str,
-                    Event::ThreadCreated(ThreadCreated {
-                        thread_id: new_thread_id.clone(),
-                        review_id: review_id.to_string(),
-                        file_path: file_path.to_string(),
-                        selection: selection.clone(),
-                        commit_hash,
-                    }),
-                );
+            let thread_event = EventEnvelope::new(
+                &author_str,
+                Event::ThreadCreated(ThreadCreated {
+                    thread_id: new_thread_id.clone(),
+                    review_id: review_id.to_string(),
+                    file_path: file_path.to_string(),
+                    selection,
+                    commit_hash,
+                }),
+            );
 
-                let log = open_or_create_review(self.ctx.seal_root(), review_id)
-                    .map_err(CoreError::Internal)?;
-                log.append(&thread_event).map_err(CoreError::Internal)?;
+            let log = open_or_create_review(self.ctx.seal_root(), review_id)
+                .map_err(CoreError::Internal)?;
+            log.append(&thread_event).map_err(CoreError::Internal)?;
 
-                (new_thread_id, 1, true)
-            }
+            (new_thread_id, 1, true)
         };
 
         // Add the comment
@@ -179,8 +180,8 @@ impl<'a> CommentService<'a> {
             }),
         );
 
-        let log = open_or_create_review(self.ctx.seal_root(), review_id)
-            .map_err(CoreError::Internal)?;
+        let log =
+            open_or_create_review(self.ctx.seal_root(), review_id).map_err(CoreError::Internal)?;
         log.append(&comment_event).map_err(CoreError::Internal)?;
 
         Ok(AddCommentResult {

@@ -420,19 +420,6 @@ fn format_ref_for_display(raw: &str, max_width: usize) -> String {
     format_with_prefix("⎇ ", branch, max_width)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::split_sidebar_path;
-
-    #[test]
-    fn split_sidebar_path_preserves_filename() {
-        let (dir, file) = split_sidebar_path("crates/wraith-diff/src/lib.rs", 18);
-
-        assert!(dir.ends_with('/'));
-        assert_eq!(file, "lib.rs");
-    }
-}
-
 fn format_with_prefix(prefix: &str, body: &str, max_width: usize) -> String {
     let prefix_chars = prefix.chars().count();
     if max_width <= prefix_chars {
@@ -700,5 +687,18 @@ fn render_help_bar(model: &Model, buffer: &mut OptimizedBuffer, area: Rect) {
         draw_help_bar_with_bg(buffer, footer, &model.theme, &all_hints, dimmed_bg);
     } else {
         draw_help_bar(buffer, footer, &model.theme, &all_hints);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::split_sidebar_path;
+
+    #[test]
+    fn split_sidebar_path_preserves_filename() {
+        let (dir, file) = split_sidebar_path("crates/wraith-diff/src/lib.rs", 18);
+
+        assert!(dir.ends_with('/'));
+        assert_eq!(file, "lib.rs");
     }
 }

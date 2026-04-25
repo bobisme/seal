@@ -37,13 +37,13 @@ pub struct CodeContext {
 impl CodeContext {
     /// Check if the context is empty.
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.lines.is_empty()
     }
 
     /// Get the number of lines in the context.
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.lines.len()
     }
 }

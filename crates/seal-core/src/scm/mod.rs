@@ -61,7 +61,7 @@ impl BackendDetection {
     }
 
     #[must_use]
-    pub fn has_both(&self) -> bool {
+    pub const fn has_both(&self) -> bool {
         self.git_root.is_some() && self.jj_root.is_some()
     }
 
@@ -109,7 +109,7 @@ pub fn resolve_backend(
 
     let selected = match preference {
         ScmPreference::Git => {
-            let root = detection.git_root.clone().ok_or_else(|| {
+            let root = detection.git_root.ok_or_else(|| {
                 anyhow::anyhow!(
                     "Requested SCM backend 'git' but no Git repository was detected.\n  To fix: run in a Git repository, or use --scm jj"
                 )
@@ -117,7 +117,7 @@ pub fn resolve_backend(
             ScmKind::Git.with_root(root)
         }
         ScmPreference::Jj => {
-            let root = detection.jj_root.clone().ok_or_else(|| {
+            let root = detection.jj_root.ok_or_else(|| {
                 anyhow::anyhow!(
                     "Requested SCM backend 'jj' but no jj repository was detected.\n  To fix: run in a jj repository, or use --scm git"
                 )
@@ -164,7 +164,7 @@ struct SelectedBackend {
 }
 
 impl ScmKind {
-    fn with_root(self, root: PathBuf) -> SelectedBackend {
+    const fn with_root(self, root: PathBuf) -> SelectedBackend {
         SelectedBackend { kind: self, root }
     }
 }

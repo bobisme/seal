@@ -21,13 +21,10 @@ use seal_core::jj::{resolve_seal_root_from_path, resolve_workspace_root};
 use seal_core::scm::{resolve_backend, resolve_preference};
 
 /// Resolve identity based on CLI flags.
-/// Priority: --agent > BOTSEAL_AGENT/SEAL_AGENT/AGENT/BOTBUS_AGENT > $USER (TTY only)
-fn resolve_identity(cli: &Cli) -> Result<Option<String>> {
-    if let Some(ref agent) = cli.agent {
-        return Ok(Some(agent.clone()));
-    }
-    // Will be resolved lazily by get_agent_identity when needed
-    Ok(None)
+/// Priority: --agent > `BOTSEAL_AGENT/SEAL_AGENT/AGENT/BOTBUS_AGENT` > $USER (TTY only)
+fn resolve_identity(cli: &Cli) -> Option<String> {
+    cli.agent.clone()
+    // None falls back to lazy resolution via get_agent_identity
 }
 
 fn main() -> Result<()> {
@@ -69,7 +66,7 @@ fn main() -> Result<()> {
     let format = cli.output_format();
 
     // Resolve identity (--agent override, otherwise deferred to env vars / TTY fallback)
-    let identity = resolve_identity(&cli)?;
+    let identity = resolve_identity(&cli);
 
     match cli.command {
         Commands::Init => {

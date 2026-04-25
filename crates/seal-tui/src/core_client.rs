@@ -22,6 +22,7 @@ pub struct CoreClient {
 }
 
 impl CoreClient {
+    #[must_use]
     pub fn new(ctx: CoreContext, repo_root: &Path) -> Self {
         Self {
             ctx,
@@ -110,13 +111,12 @@ impl SealClient for CoreClient {
     fn load_review_data(&self, review_id: &str) -> Result<Option<ReviewData>> {
         let services = self.services()?;
 
-        let detail = match services
+        let Some(detail) = services
             .reviews()
             .get_optional(review_id)
             .map_err(|e| anyhow::anyhow!("{e}"))?
-        {
-            Some(d) => d,
-            None => return Ok(None),
+        else {
+            return Ok(None);
         };
 
         let core_threads = services
@@ -191,7 +191,7 @@ impl SealClient for CoreClient {
                 file_path,
                 selection,
                 body,
-                review.initial_commit.clone(),
+                review.initial_commit,
                 Some(&agent),
             )
             .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -220,9 +220,8 @@ impl CoreClient {
         review: &seal_core::projection::ReviewDetail,
         threads: &[seal_core::projection::ThreadSummary],
     ) -> Vec<FileData> {
-        let scm = match resolve_backend(&self.repo_root, ScmPreference::Auto) {
-            Ok(s) => s,
-            Err(_) => return Vec::new(),
+        let Ok(scm) = resolve_backend(&self.repo_root, ScmPreference::Auto) else {
+            return Vec::new();
         };
 
         // Resolve target commit
@@ -268,7 +267,9 @@ impl CoreClient {
                 continue;
             }
 
-            let diff = diffs_by_file.get(file_path.as_str()).map(|s| s.to_string());
+            let diff = diffs_by_file
+                .get(file_path.as_str())
+                .map(std::string::ToString::to_string);
 
             // Check for orphaned threads (not covered by diff hunks)
             let file_threads: Vec<&seal_core::projection::ThreadSummary> = threads
@@ -276,23 +277,21 @@ impl CoreClient {
                 .filter(|t| &t.file_path == file_path)
                 .collect();
 
-            let content = if !file_threads.is_empty() {
-                if let Some(ref diff_text) = diff {
-                    let hunks = parse_hunk_ranges(diff_text);
-                    let has_orphan = file_threads.iter().any(|t| {
-                        let line = t.selection_start as u32;
-                        !hunks.iter().any(|h| line >= h.0 && line <= h.1)
-                    });
-                    if has_orphan {
-                        build_content_window(&file_cache, file_path, &file_threads)
-                    } else {
-                        None
-                    }
-                } else {
+            let content = if file_threads.is_empty() {
+                None
+            } else if let Some(ref diff_text) = diff {
+                let hunks = parse_hunk_ranges(diff_text);
+                let has_orphan = file_threads.iter().any(|t| {
+                    let line = t.selection_start as u32;
+                    !hunks.iter().any(|h| line >= h.0 && line <= h.1)
+                });
+                if has_orphan {
                     build_content_window(&file_cache, file_path, &file_threads)
+                } else {
+                    None
                 }
             } else {
-                None
+                build_content_window(&file_cache, file_path, &file_threads)
             };
 
             result.push(FileData {
@@ -351,9 +350,7 @@ fn parse_hunk_ranges(diff: &str) -> Vec<(u32, u32)> {
         }
         if let Some(plus_pos) = line.find('+') {
             let after_plus = &line[plus_pos + 1..];
-            let end = after_plus
-                .find(|c: char| c == ' ' || c == '@')
-                .unwrap_or(after_plus.len());
+            let end = after_plus.find([' ', '@']).unwrap_or(after_plus.len());
             let range_str = &after_plus[..end];
 
             if let Some((start_str, count_str)) = range_str.split_once(',') {
@@ -403,7 +400,7 @@ fn build_content_window(
         return None;
     }
 
-    let window_lines: Vec<String> = lines[(start_line as usize - 1)..=(end_line as usize - 1)]
+    let window_lines: Vec<String> = lines[(start_line as usize - 1)..(end_line as usize)]
         .iter()
         .map(|l| (*l).to_string())
         .collect();

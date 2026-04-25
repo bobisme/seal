@@ -11,7 +11,7 @@ pub struct GitRepo {
 
 impl GitRepo {
     #[must_use]
-    pub fn new(root: PathBuf) -> Self {
+    pub const fn new(root: PathBuf) -> Self {
         Self { root }
     }
 
@@ -127,14 +127,18 @@ impl ScmRepo for GitRepo {
         let output = self
             .run_git(&["log", "-1", "--format=%P", "--end-of-options", commit])
             .with_context(|| format!("Failed to resolve parent commit for {commit}"))?;
-        
+
         let parents = output.trim();
         if parents.is_empty() {
             // Root commit (no parents), use Git's empty tree hash
             Ok("4b825dc642cb6eb9a060e54bf8d69288fbee4904".to_string())
         } else {
             // For merge commits, %P returns space-separated parents. Take the first.
-            Ok(parents.split_whitespace().next().unwrap_or(parents).to_string())
+            Ok(parents
+                .split_whitespace()
+                .next()
+                .unwrap_or(parents)
+                .to_string())
         }
     }
 

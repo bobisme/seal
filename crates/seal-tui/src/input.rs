@@ -420,6 +420,24 @@ fn diff_content_width(model: &Model) -> u32 {
     pane_width.saturating_sub(DIFF_MARGIN * 2)
 }
 
+fn map_command_palette_key(key: KeyCode, modifiers: KeyModifiers) -> Message {
+    if modifiers.contains(KeyModifiers::CTRL) {
+        return match key {
+            KeyCode::Char('w') => Message::CommandPaletteDeleteWord,
+            _ => Message::Noop,
+        };
+    }
+    match key {
+        KeyCode::Esc => Message::HideCommandPalette,
+        KeyCode::Up => Message::CommandPalettePrev,
+        KeyCode::Down => Message::CommandPaletteNext,
+        KeyCode::Enter => Message::CommandPaletteExecute,
+        KeyCode::Char(c) => Message::CommandPaletteUpdateInput(c.to_string()),
+        KeyCode::Backspace => Message::CommandPaletteInputBackspace,
+        _ => Message::Noop,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -451,23 +469,5 @@ mod tests {
 
         let msg = map_review_detail_key(&model, KeyCode::Char('j'), KeyModifiers::empty());
         assert!(matches!(msg, Message::ScrollDown));
-    }
-}
-
-fn map_command_palette_key(key: KeyCode, modifiers: KeyModifiers) -> Message {
-    if modifiers.contains(KeyModifiers::CTRL) {
-        return match key {
-            KeyCode::Char('w') => Message::CommandPaletteDeleteWord,
-            _ => Message::Noop,
-        };
-    }
-    match key {
-        KeyCode::Esc => Message::HideCommandPalette,
-        KeyCode::Up => Message::CommandPalettePrev,
-        KeyCode::Down => Message::CommandPaletteNext,
-        KeyCode::Enter => Message::CommandPaletteExecute,
-        KeyCode::Char(c) => Message::CommandPaletteUpdateInput(c.to_string()),
-        KeyCode::Backspace => Message::CommandPaletteInputBackspace,
-        _ => Message::Noop,
     }
 }

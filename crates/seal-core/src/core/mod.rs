@@ -52,7 +52,7 @@ impl CoreContext {
     ///
     /// # Arguments
     /// * `seal_root` - Path to the repository root (parent of `.seal/`)
-    /// * `db_path` - Path to the SQLite projection database
+    /// * `db_path` - Path to the `SQLite` projection database
     pub fn new(seal_root: &Path, db_path: &Path) -> CoreResult<Self> {
         let seal_dir = seal_root.join(".seal");
         if !seal_dir.exists() {
@@ -115,31 +115,31 @@ pub struct SealServices {
 impl SealServices {
     /// Access review operations.
     #[must_use]
-    pub fn reviews(&self) -> reviews::ReviewService<'_> {
+    pub const fn reviews(&self) -> reviews::ReviewService<'_> {
         reviews::ReviewService::new(&self.ctx, &self.db)
     }
 
     /// Access thread operations.
     #[must_use]
-    pub fn threads(&self) -> threads::ThreadService<'_> {
+    pub const fn threads(&self) -> threads::ThreadService<'_> {
         threads::ThreadService::new(&self.ctx, &self.db)
     }
 
     /// Access comment operations.
     #[must_use]
-    pub fn comments(&self) -> comments::CommentService<'_> {
+    pub const fn comments(&self) -> comments::CommentService<'_> {
         comments::CommentService::new(&self.ctx, &self.db)
     }
 
     /// Access inbox operations.
     #[must_use]
-    pub fn inbox(&self) -> inbox::InboxService<'_> {
+    pub const fn inbox(&self) -> inbox::InboxService<'_> {
         inbox::InboxService::new(&self.db)
     }
 
     /// Access sync operations.
     #[must_use]
-    pub fn sync(&self) -> sync::SyncService<'_> {
+    pub const fn sync(&self) -> sync::SyncService<'_> {
         sync::SyncService::new(&self.ctx, &self.db)
     }
 
@@ -147,13 +147,13 @@ impl SealServices {
     ///
     /// Useful for advanced queries not covered by the service layer.
     #[must_use]
-    pub fn db(&self) -> &ProjectionDb {
+    pub const fn db(&self) -> &ProjectionDb {
         &self.db
     }
 
     /// Get a reference to the core context.
     #[must_use]
-    pub fn context(&self) -> &CoreContext {
+    pub const fn context(&self) -> &CoreContext {
         &self.ctx
     }
 }

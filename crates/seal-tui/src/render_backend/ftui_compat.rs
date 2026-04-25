@@ -274,7 +274,7 @@ fn key_event_from_ftui(key: ft::KeyEvent) -> Option<KeyEvent> {
     })
 }
 
-fn keycode_from_ftui(code: ft::KeyCode) -> Option<KeyCode> {
+const fn keycode_from_ftui(code: ft::KeyCode) -> Option<KeyCode> {
     Some(match code {
         ft::KeyCode::Char(c) => KeyCode::Char(c),
         ft::KeyCode::Enter => KeyCode::Enter,
@@ -599,6 +599,7 @@ impl OptimizedBuffer {
 }
 
 #[derive(Debug, Clone, Copy)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct RendererOptions {
     pub use_alt_screen: bool,
     pub hide_cursor: bool,
@@ -624,12 +625,12 @@ impl Renderer {
         Ok(renderer)
     }
 
-    pub fn set_background(&mut self, color: Rgba) {
+    pub const fn set_background(&mut self, color: Rgba) {
         self.background = color;
     }
 
     #[must_use]
-    pub fn buffer(&mut self) -> &mut OptimizedBuffer {
+    pub const fn buffer(&mut self) -> &mut OptimizedBuffer {
         &mut self.buffer
     }
 
@@ -637,9 +638,9 @@ impl Renderer {
         self.buffer.clear(self.background);
     }
 
-    pub fn invalidate(&mut self) {}
+    pub const fn invalidate(&mut self) {}
 
-    pub fn present(&mut self) -> io::Result<()> {
+    pub const fn present(&mut self) -> io::Result<()> {
         Ok(())
     }
 
@@ -662,7 +663,7 @@ impl Drop for RawModeGuard {
     fn drop(&mut self) {}
 }
 
-pub fn enable_raw_mode() -> io::Result<RawModeGuard> {
+pub const fn enable_raw_mode() -> io::Result<RawModeGuard> {
     Ok(RawModeGuard)
 }
 
@@ -689,7 +690,7 @@ pub fn color_from_hex(hex: &str) -> Option<Rgba> {
 }
 
 #[must_use]
-pub fn color_with_alpha(color: Rgba, alpha: f32) -> Rgba {
+pub const fn color_with_alpha(color: Rgba, alpha: f32) -> Rgba {
     Rgba::new(color.r, color.g, color.b, alpha.clamp(0.0, 1.0))
 }
 
@@ -717,9 +718,9 @@ pub fn color_blend_over(fg: Rgba, bg: Rgba) -> Rgba {
         return Rgba::TRANSPARENT;
     }
 
-    let out_r = (fg.r * src_a + bg.r * dst_a * (1.0 - src_a)) / out_a;
-    let out_g = (fg.g * src_a + bg.g * dst_a * (1.0 - src_a)) / out_a;
-    let out_b = (fg.b * src_a + bg.b * dst_a * (1.0 - src_a)) / out_a;
+    let out_r = fg.r.mul_add(src_a, bg.r * dst_a * (1.0 - src_a)) / out_a;
+    let out_g = fg.g.mul_add(src_a, bg.g * dst_a * (1.0 - src_a)) / out_a;
+    let out_b = fg.b.mul_add(src_a, bg.b * dst_a * (1.0 - src_a)) / out_a;
     Rgba::new(out_r, out_g, out_b, out_a)
 }
 

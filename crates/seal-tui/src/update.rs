@@ -913,7 +913,7 @@ pub fn update(model: &mut Model, msg: Message) {
 }
 
 /// Build a `CommentRequest` from the current model state (visual selection or expanded thread).
-fn build_comment_request(model: &mut Model) -> Option<CommentRequest> {
+fn build_comment_request(model: &Model) -> Option<CommentRequest> {
     let review = model.current_review.as_ref()?;
     let review_id = review.review_id.clone();
     let files = model.files_with_threads();

@@ -108,7 +108,7 @@ enum Level {
 }
 
 impl Level {
-    fn as_str(self) -> &'static str {
+    const fn as_str(self) -> &'static str {
         match self {
             Self::None => "none",
             Self::Note => "note",
@@ -157,10 +157,7 @@ fn compute_fingerprint(result: &SarifResult, tool_name: &str) -> String {
         .first()
         .and_then(|l| l.physical_location.as_ref())
         .map(|p| {
-            let uri = p
-                .artifact_location
-                .as_ref()
-                .map_or("", |a| a.uri.as_str());
+            let uri = p.artifact_location.as_ref().map_or("", |a| a.uri.as_str());
             let line = p.region.as_ref().and_then(|r| r.start_line).unwrap_or(0);
             format!("{uri}:{line}")
         })
@@ -198,9 +195,8 @@ fn format_body(result: &SarifResult, tool_name: &str, level: Level, fingerprint:
 fn body_contains_fingerprint(body: &str, fingerprint: &str) -> bool {
     // Look for "<!-- sarif-fp: <fingerprint> -->" — match on the fingerprint substring
     // inside a sarif-fp marker comment.
-    body.lines().any(|line| {
-        line.contains(FINGERPRINT_TAG) && line.contains(fingerprint)
-    })
+    body.lines()
+        .any(|line| line.contains(FINGERPRINT_TAG) && line.contains(fingerprint))
 }
 
 // --------------------------------------------------------------------------
@@ -232,9 +228,8 @@ pub fn run_sarif_import(
     let services = open_services(seal_root)?;
 
     // Verify review exists and is open.
-    let review = match services.reviews().get_optional(review_id)? {
-        None => return Err(review_not_found_error(seal_root, review_id)),
-        Some(r) => r,
+    let Some(review) = services.reviews().get_optional(review_id)? else {
+        return Err(review_not_found_error(seal_root, review_id));
     };
     if review.status != "open" {
         bail!(
@@ -483,9 +478,7 @@ mod tests {
             },
             locations: vec![SarifLocation {
                 physical_location: Some(SarifPhysicalLocation {
-                    artifact_location: Some(SarifArtifactLocation {
-                        uri: "a.rs".into(),
-                    }),
+                    artifact_location: Some(SarifArtifactLocation { uri: "a.rs".into() }),
                     region: Some(SarifRegion {
                         start_line: Some(10),
                         end_line: None,

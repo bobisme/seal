@@ -101,7 +101,7 @@ pub fn resolve_repo_root(start_path: &Path) -> Result<PathBuf> {
         main_repo_jj_repo
             .parent() // .jj
             .and_then(|jj| jj.parent()) // repo root
-            .map(|p| p.to_path_buf())
+            .map(std::path::Path::to_path_buf)
             .context("Invalid main repo path in workspace pointer")
     } else {
         bail!("Invalid jj repository structure: .jj/repo is neither file nor directory");
@@ -135,7 +135,7 @@ pub fn resolve_seal_root_from_path(path: &Path) -> Result<PathBuf> {
     if canonical_path.file_name() == Some(std::ffi::OsStr::new(".seal")) {
         return canonical_path
             .parent()
-            .map(|p| p.to_path_buf())
+            .map(std::path::Path::to_path_buf)
             .context(".seal directory has no parent");
     }
 
@@ -272,7 +272,7 @@ impl JjRepo {
         Ok(output.trim().to_string())
     }
 
-    /// Get the parent commit_id for a given commit.
+    /// Get the parent `commit_id` for a given commit.
     ///
     /// Uses jj's `parents()` revset function to find the parent.
     /// For commits with multiple parents (merges), returns the first parent.
@@ -281,14 +281,14 @@ impl JjRepo {
     ///
     /// Returns an error if the commit has no parents (root) or the command fails.
     pub fn get_parent_commit(&self, commit: &str) -> Result<String> {
-        let revset = format!("parents({})", commit);
+        let revset = format!("parents({commit})");
         let output = self
             .run_jj(&["log", "-r", &revset, "--no-graph", "-T", "commit_id"])
             .with_context(|| format!("Failed to get parent of {commit}"))?;
 
         let parent = output.trim();
         if parent.is_empty() {
-            bail!("Commit {} has no parent (root commit)", commit);
+            bail!("Commit {commit} has no parent (root commit)");
         }
         // If multiple parents, take the first one
         Ok(parent.lines().next().unwrap_or(parent).to_string())
