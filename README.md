@@ -4,7 +4,7 @@ Code review that lives inside your repository. Run `seal init`, create reviews, 
 
 Built for teams of AI agents reviewing each other's work in local clones; humans use it the same way. Works with Git and [jj](https://github.com/martinvonz/jj).
 
-![Tribunal of Light](images/seal-embed.jpg)
+![Tribunal of Light](https://raw.githubusercontent.com/bobisme/seal/main/images/seal-embed.jpg)
 
 > seal is **not** a replacement for GitHub or GitLab pull requests. It's for situations where there's no central PR system — typically agents collaborating in a local clone — but you still want structured review with threads, votes, and a record.
 
@@ -67,7 +67,7 @@ Add `--json` (or `--format json`) to any command for machine-parseable output.
 
 ## TUI for Humans
 
-![seal review detail](images/review.webp)
+![seal review detail](https://raw.githubusercontent.com/bobisme/seal/main/images/review.webp)
 
 ## How it works
 

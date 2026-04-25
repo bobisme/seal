@@ -10,6 +10,11 @@ resolver = "2"
 version = "0.27.0"
 edition = "2021"
 license = "MIT"
+authors = ["Bob <shiftsource@gmail.com>"]
+repository = "https://github.com/bobisme/seal"
+homepage = "https://github.com/bobisme/seal"
+keywords = ["code-review", "git", "jj", "agents", "cli"]
+categories = ["command-line-utilities", "development-tools"]
 
 [workspace.dependencies]
 anyhow = "1.0.100"
@@ -46,7 +51,8 @@ tracing-opentelemetry = "0.32"
 tempfile = "3.24.0"
 
 # Internal
-seal-core = { path = "crates/seal-core" }
+seal-core = { path = "crates/seal-core", version = "0.27.0" }
+seal-tui = { path = "crates/seal-tui", version = "0.27.0" }
 
 [workspace.lints.clippy]
 pedantic = { level = "deny", priority = -1 }
