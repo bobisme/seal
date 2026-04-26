@@ -2,7 +2,7 @@ name: Snitch Security Scan
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened]
+    types: [opened, synchronize, reopened, workflow_dispatch]
   workflow_dispatch:
 
 permissions:
