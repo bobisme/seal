@@ -6,6 +6,8 @@ pub mod doctor;
 pub mod helpers;
 pub mod init;
 pub mod migrate;
+#[allow(dead_code)]
+pub mod remote_sync;
 pub mod reviews;
 pub mod sarif;
 pub mod status;
