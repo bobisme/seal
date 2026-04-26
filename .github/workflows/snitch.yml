@@ -2,7 +2,7 @@ name: Snitch Security Scan
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened, workflow_dispatch]
+    types: [opened, synchronize, reopened]
   workflow_dispatch:
 
 permissions:
@@ -27,6 +27,12 @@ jobs:
           openrouter-api-key: ${{ secrets.OPENROUTER_API_KEY }}
           provider: openrouter
           model: sonnet
+      - name: Upload snitch report
+        if: hashFiles('SECURITY_AUDIT_REPORT.md') != ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: Snitch Report
+          path: SECURITY_AUDIT_REPORT.md
       # - name: Post Snitch SARIF findings in the pull request
       #   if: github.event_name == 'pull_request'
       #   uses: sett-and-hive/sarif-to-comment-action@v2.0.1
