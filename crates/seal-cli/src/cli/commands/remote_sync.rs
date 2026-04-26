@@ -3,6 +3,8 @@
 //! Lets a user point seal at any git URL to mirror that repo's `.seal/`
 //! events into the local repo. Useful for ingesting reviews produced by
 //! agents running on other machines.
+//!
+//! Status: experimental, off by default. See bn-2q9i for the design notes.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
