@@ -33,3 +33,7 @@
 1777159908517756	seal-dev	itc:v3:AWKZ8kmeSSZmc0AAAAAAQbfVb1VtuwAAAAEwHw		item.assign	bn-qp4h	{"action":"assign","agent":"seal-dev"}	blake3:OKWz5ziU-ImKEU6nj114_t3xJcWU-AK8uvmZ_Hw_bLk
 1777159929899764	seal-dev	itc:v3:AWKZ8kmeSSZmc0AAAAAAQbfVb1VtuwAAAAEwIA		item.move	bn-qp4h	{"state":"done"}	blake3:7gNzaS18op-vSqi5tz4OAAW3QTp1hL6xUgSLwNXSqQg
 1777159929919804	seal-dev	itc:v3:AWKZ8kmeSSZmc0AAAAAAQbfVb1VtuwAAAAEwIQ		item.move	bn-2q9i	{"state":"done"}	blake3:ZvWeXpHUsQl_v0lWkMxRvZvu2sNd_flizuCJmMCAfro
+1777328977265114	seal-dev	itc:v3:AWKZ8kmeSSZmc0AAAAAAQbfVb1VtuwAAAAEwIg		item.create	bn-1ero	{"description":"Tested snitch security tooling on main; testing complete. Remove .github/workflows/snitch.yml and clean up the snitch and snitch-test-vuln branches.","kind":"task","title":"Remove snitch security scanner workflow"}	blake3:6lXVOJVQH7BGPaYsEPnjto08Qczy1QY7pSQZfBO1yb4
+1777328981378000	seal-dev	itc:v3:AWKZ8kmeSSZmc0AAAAAAQbfVb1VtuwAAAAEwIw		item.move	bn-1ero	{"state":"doing"}	blake3:FZ-OO2oX4zyAQ8buS6YipcblThehy2sd9ByB_cGSBxk
+1777328981408799	seal-dev	itc:v3:AWKZ8kmeSSZmc0AAAAAAQbfVb1VtuwAAAAEwJA		item.assign	bn-1ero	{"action":"assign","agent":"seal-dev"}	blake3:UfCNGJcIt3DPmqt0Xkk39P6jeQ9itblKkCuiXeTiuWM
+1777328989467221	seal-dev	itc:v3:AWKZ8kmeSSZmc0AAAAAAQbfVb1VtuwAAAAEwJQ		item.move	bn-1ero	{"state":"done"}	blake3:9lXMVe1TvmJip9f9ET9rTXNFqHD1P7FigiI9KSKmAAA
