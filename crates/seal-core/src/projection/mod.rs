@@ -1671,7 +1671,7 @@ fn apply_comment_added(
     ts: &DateTime<Utc>,
 ) -> Result<()> {
     // Insert the comment
-    conn.execute(
+    let inserted = conn.execute(
         "INSERT OR IGNORE INTO comments (
             comment_id, thread_id, body, author, created_at
         ) VALUES (?, ?, ?, ?, ?)",
@@ -1683,11 +1683,12 @@ fn apply_comment_added(
             ts.to_rfc3339(),
         ],
     )?;
-    // Increment the thread's next_comment_number for future comments
-    conn.execute(
-        "UPDATE threads SET next_comment_number = next_comment_number + 1 WHERE thread_id = ?",
-        params![event.thread_id],
-    )?;
+    if inserted > 0 {
+        conn.execute(
+            "UPDATE threads SET next_comment_number = next_comment_number + 1 WHERE thread_id = ?",
+            params![event.thread_id],
+        )?;
+    }
     Ok(())
 }
 
@@ -3835,6 +3836,21 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM comments", [], |row| row.get(0))
             .unwrap();
         assert_eq!(comment_count, 1, "no duplicate comments");
+
+        apply_event(&db, &comment_evt).unwrap();
+
+        let next_comment_number: i64 = db
+            .conn()
+            .query_row(
+                "SELECT next_comment_number FROM threads WHERE thread_id = ?",
+                params!["th-idem"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            next_comment_number, 2,
+            "duplicate comment replay must not advance next_comment_number"
+        );
     }
 
     #[test]

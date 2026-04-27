@@ -242,7 +242,7 @@ pub fn run_sarif_import(
     let commit_hash = resolve_review_thread_commit(scm, &review);
 
     // Collect existing comment bodies on this review (for dedup).
-    let existing_bodies = collect_review_comment_bodies(&services, review_id)?;
+    let mut existing_bodies = collect_review_comment_bodies(&services, review_id)?;
 
     let mut imported: Vec<serde_json::Value> = Vec::new();
     let mut skipped_level = 0_usize;
@@ -294,6 +294,7 @@ pub fn run_sarif_import(
             };
             let body = format_body(result, tool_name, level, &fingerprint);
 
+            let services = open_services(seal_root)?;
             let added = services.comments().add_to_review(
                 review_id,
                 file_uri,
@@ -302,6 +303,8 @@ pub fn run_sarif_import(
                 commit_hash.clone(),
                 author,
             )?;
+
+            existing_bodies.push(body);
 
             imported.push(serde_json::json!({
                 "comment_id": added.comment_id,
@@ -365,6 +368,83 @@ fn collect_review_comment_bodies(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use seal_core::events::{Event, EventEnvelope, ReviewCreated};
+    use seal_core::log::{open_or_create_review, AppendLog};
+    use seal_core::scm::{ScmKind, ScmRepo};
+    use std::path::{Path, PathBuf};
+    use tempfile::tempdir;
+
+    struct TestScmRepo {
+        root: PathBuf,
+    }
+
+    impl ScmRepo for TestScmRepo {
+        fn kind(&self) -> ScmKind {
+            ScmKind::Git
+        }
+
+        fn root(&self) -> &Path {
+            &self.root
+        }
+
+        fn current_anchor(&self) -> Result<String> {
+            Ok("anchor".to_string())
+        }
+
+        fn current_commit(&self) -> Result<String> {
+            Ok("commit".to_string())
+        }
+
+        fn commit_for_anchor(&self, _anchor: &str) -> Result<String> {
+            Ok("commit".to_string())
+        }
+
+        fn parent_commit(&self, _commit: &str) -> Result<String> {
+            Ok("parent".to_string())
+        }
+
+        fn diff_git(&self, _from: &str, _to: &str) -> Result<String> {
+            Ok(String::new())
+        }
+
+        fn diff_git_file(&self, _from: &str, _to: &str, _file: &str) -> Result<String> {
+            Ok(String::new())
+        }
+
+        fn changed_files_between(&self, _from: &str, _to: &str) -> Result<Vec<String>> {
+            Ok(vec!["src/foo.rs".to_string()])
+        }
+
+        fn file_exists(&self, _rev: &str, path: &str) -> Result<bool> {
+            Ok(path == "src/foo.rs")
+        }
+
+        fn show_file(&self, _rev: &str, _path: &str) -> Result<String> {
+            Ok(String::new())
+        }
+    }
+
+    fn setup_review(repo_root: &Path, review_id: &str) {
+        let seal_dir = repo_root.join(".seal");
+        std::fs::create_dir(&seal_dir).unwrap();
+        std::fs::write(seal_dir.join("version"), "2\n").unwrap();
+        std::fs::create_dir(seal_dir.join("reviews")).unwrap();
+
+        let log = open_or_create_review(repo_root, review_id).unwrap();
+        log.append(&EventEnvelope::new(
+            "test-author",
+            Event::ReviewCreated(ReviewCreated {
+                review_id: review_id.to_string(),
+                jj_change_id: "anchor".to_string(),
+                scm_kind: Some("git".to_string()),
+                scm_anchor: Some("anchor".to_string()),
+                initial_commit: "commit".to_string(),
+                title: "Review".to_string(),
+                description: None,
+            }),
+        ))
+        .unwrap();
+    }
 
     #[test]
     fn parse_level_accepts_common_spellings() {
@@ -513,5 +593,87 @@ mod tests {
         // Body should be human-readable
         assert!(body.contains("[codeql]"));
         assert!(body.contains("do not"));
+    }
+
+    #[test]
+    fn import_refreshes_projection_and_skips_in_batch_duplicates() {
+        let dir = tempdir().unwrap();
+        let repo_root = dir.path();
+        setup_review(repo_root, "cr-sarif");
+
+        let sarif = r#"{
+          "runs": [{
+            "tool": {"driver": {"name": "codeql"}},
+            "results": [
+              {
+                "ruleId": "R1",
+                "level": "warning",
+                "message": {"text": "first"},
+                "locations": [{
+                  "physicalLocation": {
+                    "artifactLocation": {"uri": "src/foo.rs"},
+                    "region": {"startLine": 7}
+                  }
+                }],
+                "partialFingerprints": {"primary": "fp-1"}
+              },
+              {
+                "ruleId": "R2",
+                "level": "warning",
+                "message": {"text": "second"},
+                "locations": [{
+                  "physicalLocation": {
+                    "artifactLocation": {"uri": "src/foo.rs"},
+                    "region": {"startLine": 7}
+                  }
+                }],
+                "partialFingerprints": {"primary": "fp-2"}
+              },
+              {
+                "ruleId": "R1",
+                "level": "warning",
+                "message": {"text": "duplicate"},
+                "locations": [{
+                  "physicalLocation": {
+                    "artifactLocation": {"uri": "src/foo.rs"},
+                    "region": {"startLine": 7}
+                  }
+                }],
+                "partialFingerprints": {"primary": "fp-1"}
+              }
+            ]
+          }]
+        }"#;
+        let sarif_path = repo_root.join("findings.sarif");
+        std::fs::write(&sarif_path, sarif).unwrap();
+
+        let scm = TestScmRepo {
+            root: repo_root.to_path_buf(),
+        };
+        run_sarif_import(
+            repo_root,
+            &scm,
+            &sarif_path,
+            "cr-sarif",
+            "warning",
+            Some("tester"),
+            OutputFormat::Json,
+        )
+        .unwrap();
+
+        let services = crate::cli::commands::helpers::open_services(repo_root).unwrap();
+        let threads = services.threads().list("cr-sarif", None, None).unwrap();
+        assert_eq!(
+            threads.len(),
+            1,
+            "same-location findings should share the thread created earlier in the import"
+        );
+
+        let comments = services.comments().list(&threads[0].thread_id).unwrap();
+        assert_eq!(
+            comments.len(),
+            2,
+            "duplicate fingerprints in the same import should be skipped"
+        );
     }
 }

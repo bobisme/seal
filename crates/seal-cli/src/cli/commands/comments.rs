@@ -71,12 +71,12 @@ pub fn run_comment(
 
     let services = open_services(seal_root)?;
 
-    // Verify review exists and is open
+    // Verify review exists and can still receive feedback
     let Some(review) = services.reviews().get_optional(review_id)? else {
         return Err(review_not_found_error(seal_root, review_id));
     };
 
-    if review.status != "open" {
+    if review.status != "open" && review.status != "approved" {
         bail!(
             "Cannot comment on review with status '{}': {}",
             review.status,
