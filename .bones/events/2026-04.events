@@ -46,3 +46,6 @@
 1777331808783282	seal-dev	itc:v3:AWKZ8kmeSSZmc0AAAAAAQbfVb1VtuwAAAAEwLA		item.assign	bn-xkz7	{"action":"assign","agent":"seal-dev"}	blake3:evPIIm3S2Jzc2gWI90436l4clFvWWUy3nycd7N7LBwk
 1777331808805784	seal-dev	itc:v3:AWKZ8kmeSSZmc0AAAAAAQbfVb1VtuwAAAAEwLQ		item.move	bn-1642	{"state":"doing"}	blake3:ePxzLg88lDVUXJLqqVlV6y1nK1ps3sf9J5wuDeX1D8A
 1777331808811680	seal-dev	itc:v3:AWKZ8kmeSSZmc0AAAAAAQbfVb1VtuwAAAAEwLg		item.assign	bn-1642	{"action":"assign","agent":"seal-dev"}	blake3:oGvy0g1didbySH6nXjtMONRx8lz3EAF7uJbVzqSkoPw
+1777332095967025	seal-dev	itc:v3:AWKZ8kmeSSZmc0AAAAAAQbfVb1VtuwAAAAEwLw		item.move	bn-2blj	{"state":"done"}	blake3:_VWFoh-VZ4acTAUrd1mcHzTWNIYbK1cYphvfTQ6QUpA
+1777332096008069	seal-dev	itc:v3:AWKZ8kmeSSZmc0AAAAAAQbfVb1VtuwAAAAEwMA		item.move	bn-xkz7	{"state":"done"}	blake3:-TlNanjNvsBmHk8YlAlhMFHLiiKxOCvLdqs2z_2CZ-Q
+1777332096026895	seal-dev	itc:v3:AWKZ8kmeSSZmc0AAAAAAQbfVb1VtuwAAAAEwMQ		item.move	bn-1642	{"state":"done"}	blake3:wcFe4yKDLtaH0laOHsrcBJWE2a0xBmwmU377F3ak37k
