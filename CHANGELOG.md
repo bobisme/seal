@@ -8,6 +8,20 @@ prior to v0.27.0, see the [git tags](https://github.com/bobisme/seal/tags).
 
 ## [Unreleased]
 
+## [0.27.2] - 2026-04-28
+
+### Fixed
+- Hardened review thread state changes so thread creation, resolution, and reopening reject
+  missing or completed reviews instead of writing orphaned or stale events.
+- Tightened thread/comment input validation, including invalid code selections, blank agent
+  identities, SARIF fingerprint duplicate checks, and ID collision resistance.
+- Corrected code-anchor drift and context handling so modified anchors are not reported as
+  deleted and stale out-of-bounds anchors do not display misleading code.
+- Validated review JSON context windows and `--since` relative durations to avoid misleading
+  output for stale anchors or non-positive time windows.
+- Made migration preflight all target review IDs and backup paths before writing v2 logs,
+  preventing partial migrations on malformed legacy data or backup collisions.
+
 ## [0.27.1] - 2026-04-25
 
 ### Changed
@@ -32,6 +46,7 @@ prior to v0.27.0, see the [git tags](https://github.com/bobisme/seal/tags).
   - Output summarizes `imported` / `skipped_level` / `skipped_duplicate` /
     `skipped_missing_file` / `skipped_no_location` plus per-finding thread IDs.
 
-[Unreleased]: https://github.com/bobisme/seal/compare/v0.27.1...HEAD
+[Unreleased]: https://github.com/bobisme/seal/compare/v0.27.2...HEAD
+[0.27.2]: https://github.com/bobisme/seal/releases/tag/v0.27.2
 [0.27.1]: https://github.com/bobisme/seal/releases/tag/v0.27.1
 [0.27.0]: https://github.com/bobisme/seal/releases/tag/v0.27.0

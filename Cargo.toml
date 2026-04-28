@@ -7,7 +7,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.27.1"
+version = "0.27.2"
 edition = "2021"
 license = "MIT"
 authors = ["Bob <shiftsource@gmail.com>"]
@@ -51,8 +51,8 @@ tracing-opentelemetry = "0.32"
 tempfile = "3.24.0"
 
 # Internal
-seal-core = { path = "crates/seal-core", version = "0.27.1" }
-seal-tui = { path = "crates/seal-tui", version = "0.27.1" }
+seal-core = { path = "crates/seal-core", version = "0.27.2" }
+seal-tui = { path = "crates/seal-tui", version = "0.27.2" }
 
 [workspace.lints.clippy]
 pedantic = { level = "deny", priority = -1 }
