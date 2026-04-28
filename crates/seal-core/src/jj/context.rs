@@ -98,9 +98,11 @@ pub fn extract_context(
         anyhow::bail!("File {file} is empty at {commit}");
     }
 
-    // Clamp anchor to file bounds
-    let anchor_start = anchor_start.min(total_lines);
-    let anchor_end = anchor_end.min(total_lines);
+    if anchor_start > total_lines || anchor_end > total_lines {
+        anyhow::bail!(
+            "Anchor range {anchor_start}-{anchor_end} is out of bounds for {file} at {commit} ({total_lines} lines)"
+        );
+    }
 
     // Calculate context range
     let start_line = anchor_start.saturating_sub(context_lines).max(1);
@@ -173,8 +175,69 @@ pub fn format_context(ctx: &CodeContext) -> String {
 mod tests {
     use super::*;
     use crate::scm::jj::JjScmRepo;
+    use crate::scm::{ScmKind, ScmRepo};
     use std::env;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
+
+    struct MockRepo {
+        root: PathBuf,
+        contents: String,
+    }
+
+    impl MockRepo {
+        fn new(contents: &str) -> Self {
+            Self {
+                root: PathBuf::from("/tmp/seal-context-test"),
+                contents: contents.to_string(),
+            }
+        }
+    }
+
+    impl ScmRepo for MockRepo {
+        fn kind(&self) -> ScmKind {
+            ScmKind::Git
+        }
+
+        fn root(&self) -> &Path {
+            &self.root
+        }
+
+        fn current_anchor(&self) -> Result<String> {
+            Ok("current".to_string())
+        }
+
+        fn current_commit(&self) -> Result<String> {
+            Ok("current".to_string())
+        }
+
+        fn commit_for_anchor(&self, anchor: &str) -> Result<String> {
+            Ok(anchor.to_string())
+        }
+
+        fn parent_commit(&self, commit: &str) -> Result<String> {
+            Ok(format!("{commit}^"))
+        }
+
+        fn diff_git(&self, _from: &str, _to: &str) -> Result<String> {
+            Ok(String::new())
+        }
+
+        fn diff_git_file(&self, _from: &str, _to: &str, _file: &str) -> Result<String> {
+            Ok(String::new())
+        }
+
+        fn changed_files_between(&self, _from: &str, _to: &str) -> Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+
+        fn file_exists(&self, _rev: &str, _path: &str) -> Result<bool> {
+            Ok(true)
+        }
+
+        fn show_file(&self, _rev: &str, _path: &str) -> Result<String> {
+            Ok(self.contents.clone())
+        }
+    }
 
     fn test_repo() -> Option<JjScmRepo> {
         let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
@@ -287,6 +350,26 @@ mod tests {
         let result = extract_context(&repo, "Cargo.toml", "@", 0, 5, 2);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("1-based"));
+    }
+
+    #[test]
+    fn test_extract_context_anchor_start_out_of_bounds() {
+        let repo = MockRepo::new("line1\nline2\nline3\n");
+
+        let result = extract_context(&repo, "file.rs", "commit", 4, 4, 1);
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("out of bounds"));
+    }
+
+    #[test]
+    fn test_extract_context_anchor_end_out_of_bounds() {
+        let repo = MockRepo::new("line1\nline2\nline3\n");
+
+        let result = extract_context(&repo, "file.rs", "commit", 2, 4, 1);
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("out of bounds"));
     }
 
     #[test]

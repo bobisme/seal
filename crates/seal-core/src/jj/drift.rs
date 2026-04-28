@@ -171,6 +171,22 @@ impl Hunk {
     }
 }
 
+fn change_block_contains_addition(lines: &[DiffLine], index: usize) -> bool {
+    let mut start = index;
+    while start > 0 && !matches!(lines[start - 1], DiffLine::Context) {
+        start -= 1;
+    }
+
+    let mut end = index + 1;
+    while end < lines.len() && !matches!(lines[end], DiffLine::Context) {
+        end += 1;
+    }
+
+    lines[start..end]
+        .iter()
+        .any(|line| matches!(line, DiffLine::Added))
+}
+
 /// Parse hunks from a unified diff for a single file.
 ///
 /// This extracts all `@@ ... @@` sections and their content.
@@ -284,7 +300,7 @@ pub fn calculate_drift(
         let mut new_line = hunk.header.new_start;
         let mut found_as_context = false;
 
-        for diff_line in &hunk.lines {
+        for (index, diff_line) in hunk.lines.iter().enumerate() {
             match diff_line {
                 DiffLine::Context => {
                     if old_line == original_line {
@@ -298,7 +314,12 @@ pub fn calculate_drift(
                 }
                 DiffLine::Deleted => {
                     if old_line == original_line {
-                        // Our line was deleted
+                        // A replacement appears in unified diffs as one or more
+                        // deletions plus additions in the same contiguous change
+                        // block. Treat that as modified, not deleted.
+                        if change_block_contains_addition(&hunk.lines, index) {
+                            return Ok(DriftResult::Modified);
+                        }
                         return Ok(DriftResult::Deleted);
                     }
                     old_line += 1;
@@ -331,9 +352,69 @@ pub fn calculate_drift(
 mod tests {
     use super::*;
     use crate::scm::jj::JjScmRepo;
-    use crate::scm::ScmRepo;
+    use crate::scm::{ScmKind, ScmRepo};
     use std::env;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
+
+    struct MockRepo {
+        root: PathBuf,
+        diff: String,
+    }
+
+    impl MockRepo {
+        fn new(diff: &str) -> Self {
+            Self {
+                root: PathBuf::from("/tmp/seal-drift-test"),
+                diff: diff.to_string(),
+            }
+        }
+    }
+
+    impl ScmRepo for MockRepo {
+        fn kind(&self) -> ScmKind {
+            ScmKind::Git
+        }
+
+        fn root(&self) -> &Path {
+            &self.root
+        }
+
+        fn current_anchor(&self) -> Result<String> {
+            Ok("current".to_string())
+        }
+
+        fn current_commit(&self) -> Result<String> {
+            Ok("current".to_string())
+        }
+
+        fn commit_for_anchor(&self, anchor: &str) -> Result<String> {
+            Ok(anchor.to_string())
+        }
+
+        fn parent_commit(&self, commit: &str) -> Result<String> {
+            Ok(format!("{commit}^"))
+        }
+
+        fn diff_git(&self, _from: &str, _to: &str) -> Result<String> {
+            Ok(self.diff.clone())
+        }
+
+        fn diff_git_file(&self, _from: &str, _to: &str, _file: &str) -> Result<String> {
+            Ok(self.diff.clone())
+        }
+
+        fn changed_files_between(&self, _from: &str, _to: &str) -> Result<Vec<String>> {
+            Ok(vec!["test.rs".to_string()])
+        }
+
+        fn file_exists(&self, _rev: &str, _path: &str) -> Result<bool> {
+            Ok(true)
+        }
+
+        fn show_file(&self, _rev: &str, _path: &str) -> Result<String> {
+            Ok(String::new())
+        }
+    }
 
     fn test_repo() -> Option<JjScmRepo> {
         let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
@@ -480,6 +561,64 @@ index 1234567..abcdefg 100644
         // Same commit should be unchanged
         let drift = result.unwrap();
         assert_eq!(drift, DriftResult::Unchanged { current_line: 1 });
+    }
+
+    #[test]
+    fn test_calculate_drift_reports_replaced_line_as_modified() {
+        let diff = r"diff --git a/test.rs b/test.rs
+--- a/test.rs
++++ b/test.rs
+@@ -1,4 +1,4 @@
+ line1
+ line2
+-old value
++new value
+ line4
+";
+        let repo = MockRepo::new(diff);
+
+        let drift = calculate_drift(&repo, "test.rs", 3, "old", "new").unwrap();
+
+        assert_eq!(drift, DriftResult::Modified);
+    }
+
+    #[test]
+    fn test_calculate_drift_keeps_pure_deletion_as_deleted() {
+        let diff = r"diff --git a/test.rs b/test.rs
+--- a/test.rs
++++ b/test.rs
+@@ -1,4 +1,3 @@
+ line1
+ line2
+-removed
+ line4
+";
+        let repo = MockRepo::new(diff);
+
+        let drift = calculate_drift(&repo, "test.rs", 3, "old", "new").unwrap();
+
+        assert_eq!(drift, DriftResult::Deleted);
+    }
+
+    #[test]
+    fn test_calculate_drift_does_not_confuse_separate_insertion_with_modification() {
+        let diff = r"diff --git a/test.rs b/test.rs
+--- a/test.rs
++++ b/test.rs
+@@ -1,6 +1,6 @@
+ line1
+-deleted-anchor
+ line3
+ line4
++separate insertion
+ line5
+ line6
+";
+        let repo = MockRepo::new(diff);
+
+        let drift = calculate_drift(&repo, "test.rs", 2, "old", "new").unwrap();
+
+        assert_eq!(drift, DriftResult::Deleted);
     }
 
     /// Test drift detection with a synthetic diff scenario.
