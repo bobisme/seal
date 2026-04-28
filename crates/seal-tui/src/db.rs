@@ -139,4 +139,18 @@ pub trait SealClient {
     ///
     /// Returns an error if the CLI call fails.
     fn reply(&self, thread_id: &str, body: &str) -> Result<()>;
+
+    /// Resolve an open thread.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the backend update fails.
+    fn resolve_thread(&self, thread_id: &str) -> Result<()>;
+
+    /// Reopen a resolved thread.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the backend update fails.
+    fn reopen_thread(&self, thread_id: &str) -> Result<()>;
 }

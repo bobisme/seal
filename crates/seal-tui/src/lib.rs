@@ -47,7 +47,7 @@ use anyhow::{Context, Result};
 
 use crate::config::{load_ui_config, save_ui_config};
 use crate::input::map_event_to_message;
-use crate::model::{CommentRequest, DiffViewMode, EditorRequest};
+use crate::model::{CommentRequest, DiffViewMode, EditorRequest, ThreadStatusAction};
 use crate::render_backend::{enable_raw_mode, Event, RawModeGuard, Renderer, RendererOptions};
 use crate::render_backend::{event_from_ftui, rgba_to_packed, OptimizedBuffer};
 use crate::render_backend::{
@@ -457,6 +457,34 @@ fn process_event(event: &Event, model: &mut Model, ctx: &mut EventContext<'_>) -
                     model.flash_message = Some(format!("Comment failed: {e}"));
                 }
             }
+        }
+        model.needs_redraw = true;
+    }
+
+    if let Some(change) = model.pending_thread_status_change.take() {
+        if let Some(client) = ctx.client.as_ref() {
+            let result = match change.action {
+                ThreadStatusAction::Resolve => client.resolve_thread(&change.thread_id),
+                ThreadStatusAction::Reopen => client.reopen_thread(&change.thread_id),
+            };
+            match result {
+                Ok(()) => {
+                    reload_review_data(model, *client, ctx.repo_path);
+                    model.flash_message = Some(match change.action {
+                        ThreadStatusAction::Resolve => {
+                            format!("Resolved thread {}", change.thread_id)
+                        }
+                        ThreadStatusAction::Reopen => {
+                            format!("Reopened thread {}", change.thread_id)
+                        }
+                    });
+                }
+                Err(e) => {
+                    model.flash_message = Some(format!("Thread update failed: {e}"));
+                }
+            }
+        } else {
+            model.flash_message = Some("Thread update failed: no review client".to_string());
         }
         model.needs_redraw = true;
     }

@@ -61,3 +61,6 @@
 1777341369166274	seal-dev	itc:v3:AWKZ8kmeSSZmc0AAAAAAQbfVb1VtuwAAAAEwOw		item.move	bn-1isz	{"state":"done"}	blake3:ZPdXXQsT4RH2tiTX4A6cG8ir7iNtIDlePlOJRn652Mg
 1777341369197402	seal-dev	itc:v3:AWKZ8kmeSSZmc0AAAAAAQbfVb1VtuwAAAAEwPA		item.move	bn-3b6c	{"state":"done"}	blake3:i2GiNuGKH1aa-uqWfC0aDGcs2lI1XjlTZN63Ol7YryU
 1777341369208644	seal-dev	itc:v3:AWKZ8kmeSSZmc0AAAAAAQbfVb1VtuwAAAAEwPQ		item.move	bn-26oe	{"state":"done"}	blake3:WCA7HTjZzDrRGszeYkL8Fq5MOPYeztoEF06RJF26NWQ
+1777344149669001	seal-dev	itc:v3:AWKZ8kmeSSZmc0AAAAAAQbfVb1VtuwAAAAEwPg		item.create	bn-z9z6	{"description":"Randomly explore and trace code paths, identify obvious issues, and fix them.","kind":"task","title":"Fresh-eyes code exploration fixes"}	blake3:h5FvUM8fRggw-4GkMuGCalE60nYmOWEmIyBjl9SP544
+1777344155643837	seal-dev	itc:v3:AWKZ8kmeSSZmc0AAAAAAQbfVb1VtuwAAAAEwPw		item.move	bn-z9z6	{"state":"doing"}	blake3:pUcShKHTIUQidwU95oqnW2FWKnBXbMUe3wQy-DCJlTc
+1777344155650513	seal-dev	itc:v3:AWKZ8kmeSSZmc0AAAAAAQbfVb1VtuwAAAAEwQA		item.assign	bn-z9z6	{"action":"assign","agent":"seal-dev"}	blake3:2JgwnQKum0GuiCDvxTjhEPpEFHqQ8WXEIoRclNdUKUY

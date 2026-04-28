@@ -114,6 +114,19 @@ pub struct PendingCommentSubmission {
     pub body: String,
 }
 
+/// A thread status change ready to be persisted.
+#[derive(Debug, Clone)]
+pub struct PendingThreadStatusChange {
+    pub thread_id: String,
+    pub action: ThreadStatusAction,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThreadStatusAction {
+    Resolve,
+    Reopen,
+}
+
 /// In-TUI multi-line comment editor state.
 #[derive(Debug, Clone)]
 pub struct InlineEditor {
@@ -406,6 +419,8 @@ pub struct Model {
     pub inline_editor: Option<InlineEditor>,
     /// Comment ready for persistence (from inline editor submit)
     pub pending_comment_submission: Option<PendingCommentSubmission>,
+    /// Thread status change ready for persistence.
+    pub pending_thread_status_change: Option<PendingThreadStatusChange>,
 
     // === Command Palette ===
     pub command_palette_input: String,
@@ -510,6 +525,7 @@ impl Model {
             pending_comment_request: None,
             inline_editor: None,
             pending_comment_submission: None,
+            pending_thread_status_change: None,
             command_palette_input: String::new(),
             command_palette_selection: 0,
             command_palette_commands: Vec::new(),

@@ -213,6 +213,30 @@ impl SealClient for CoreClient {
 
         Ok(())
     }
+
+    fn resolve_thread(&self, thread_id: &str) -> Result<()> {
+        let services = self.services()?;
+        let agent = Self::comment_agent();
+
+        services
+            .threads()
+            .resolve(thread_id, None, Some(&agent))
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+        Ok(())
+    }
+
+    fn reopen_thread(&self, thread_id: &str) -> Result<()> {
+        let services = self.services()?;
+        let agent = Self::comment_agent();
+
+        services
+            .threads()
+            .reopen(thread_id, None, Some(&agent))
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+        Ok(())
+    }
 }
 
 // -- Diff assembly (mirrors CLI `build_file_diffs` logic) --

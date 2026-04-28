@@ -5,7 +5,7 @@ use crate::layout::visible_stream_rows;
 use crate::message::Message;
 use crate::model::{
     CommentRequest, DiffViewMode, EditorRequest, Focus, InlineEditor, Model, PaletteMode,
-    PendingCommentSubmission, ReviewFilter, Screen,
+    PendingCommentSubmission, PendingThreadStatusChange, ReviewFilter, Screen, ThreadStatusAction,
 };
 use crate::stream::{
     active_file_index, compute_stream_layout, file_scroll_offset, StreamLayoutParams,
@@ -853,8 +853,20 @@ pub fn update(model: &mut Model, msg: Message) {
             };
         }
 
-        Message::ResolveThread(_id) | Message::ReopenThread(_id) => {
-            // TODO: Write to event log
+        Message::ResolveThread(id) => {
+            model.pending_thread_status_change = Some(PendingThreadStatusChange {
+                thread_id: id,
+                action: ThreadStatusAction::Resolve,
+            });
+            model.needs_redraw = true;
+        }
+
+        Message::ReopenThread(id) => {
+            model.pending_thread_status_change = Some(PendingThreadStatusChange {
+                thread_id: id,
+                action: ThreadStatusAction::Reopen,
+            });
+            model.needs_redraw = true;
         }
 
         Message::CycleStatusFilter
@@ -1062,6 +1074,38 @@ fn update_active_file_from_scroll(model: &mut Model) {
     }
     sync_sidebar_from_active(model);
     model.needs_redraw = true;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::UiConfig;
+
+    #[test]
+    fn resolve_thread_sets_pending_status_change() {
+        let mut model = Model::new(120, 40, UiConfig::default());
+
+        update(&mut model, Message::ResolveThread("th-abc1".to_string()));
+
+        let pending = model
+            .pending_thread_status_change
+            .expect("resolve should queue a backend update");
+        assert_eq!(pending.thread_id, "th-abc1");
+        assert_eq!(pending.action, ThreadStatusAction::Resolve);
+    }
+
+    #[test]
+    fn reopen_thread_sets_pending_status_change() {
+        let mut model = Model::new(120, 40, UiConfig::default());
+
+        update(&mut model, Message::ReopenThread("th-abc1".to_string()));
+
+        let pending = model
+            .pending_thread_status_change
+            .expect("reopen should queue a backend update");
+        assert_eq!(pending.thread_id, "th-abc1");
+        assert_eq!(pending.action, ThreadStatusAction::Reopen);
+    }
 }
 
 fn sync_sidebar_from_active(model: &mut Model) {
