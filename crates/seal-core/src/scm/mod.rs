@@ -45,6 +45,99 @@ pub trait ScmRepo {
     fn show_file(&self, rev: &str, path: &str) -> Result<String>;
 }
 
+/// Return the repository path represented by one file section from a git-format diff.
+///
+/// Prefer the new-side `+++ b/path` marker because `diff --git a/path b/path`
+/// headers are ambiguous when paths contain spaces. Deleted files fall back to
+/// the old-side `--- a/path` marker.
+#[must_use]
+pub fn git_diff_section_path(section: &str) -> Option<&str> {
+    let mut old_path = None;
+    let mut new_path = None;
+    let mut renamed_to = None;
+
+    for line in section.lines() {
+        if line.starts_with("@@ ") {
+            break;
+        }
+
+        if let Some(path) = diff_marker_path(line, "--- ") {
+            old_path = Some(path);
+        } else if let Some(path) = diff_marker_path(line, "+++ ") {
+            new_path = Some(path);
+        } else if let Some(path) = line.strip_prefix("rename to ") {
+            renamed_to = Some(path);
+        }
+    }
+
+    valid_diff_path(new_path)
+        .or_else(|| valid_diff_path(renamed_to))
+        .or_else(|| valid_diff_path(old_path))
+        .or_else(|| section.lines().next().and_then(git_diff_header_new_path))
+}
+
+#[must_use]
+pub fn git_diff_changed_paths(diff: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+    let mut current_start = None;
+    let mut offset = 0;
+
+    for line in diff.lines() {
+        let byte_offset = offset;
+        offset += line.len() + 1;
+
+        if line.starts_with("diff --git") {
+            if let Some(start) = current_start {
+                if let Some(path) = git_diff_section_path(&diff[start..byte_offset]) {
+                    paths.push(path.to_string());
+                }
+            }
+            current_start = Some(byte_offset);
+        }
+    }
+
+    if let Some(start) = current_start {
+        if let Some(path) = git_diff_section_path(&diff[start..]) {
+            paths.push(path.to_string());
+        }
+    }
+
+    paths
+}
+
+fn diff_marker_path<'a>(line: &'a str, prefix: &str) -> Option<&'a str> {
+    let path = line.strip_prefix(prefix)?;
+
+    if path == "/dev/null" {
+        return Some(path);
+    }
+
+    path.strip_prefix("a/")
+        .or_else(|| path.strip_prefix("b/"))
+        .or(Some(path))
+}
+
+fn valid_diff_path(path: Option<&str>) -> Option<&str> {
+    path.filter(|value| !value.is_empty() && *value != "/dev/null")
+}
+
+fn git_diff_header_new_path(line: &str) -> Option<&str> {
+    let rest = line.strip_prefix("diff --git a/")?;
+    let mut fallback = None;
+
+    for (idx, _) in rest.match_indices(" b/") {
+        let old_path = &rest[..idx];
+        let new_path = &rest[idx + 3..];
+        fallback = Some(new_path);
+
+        if old_path == new_path {
+            return Some(new_path);
+        }
+    }
+
+    fallback
+}
+
 #[derive(Debug, Clone)]
 pub struct BackendDetection {
     pub git_root: Option<PathBuf>,
@@ -253,6 +346,72 @@ mod tests {
         assert!(validate_repo_relative_path("../etc/passwd").is_err());
         assert!(validate_repo_relative_path("/absolute/path").is_err());
         assert!(validate_repo_relative_path("./src/main.rs").is_err());
+    }
+
+    #[test]
+    fn test_git_diff_section_path_allows_spaces() {
+        let section = "\
+diff --git a/src/has space.rs b/src/has space.rs
+--- a/src/has space.rs
++++ b/src/has space.rs
+@@ -1 +1 @@
+-old
++new
+";
+
+        assert_eq!(git_diff_section_path(section), Some("src/has space.rs"));
+    }
+
+    #[test]
+    fn test_git_diff_section_path_deleted_file_uses_old_path() {
+        let section = "\
+diff --git a/src/old name.rs b/src/old name.rs
+--- a/src/old name.rs
++++ /dev/null
+@@ -1 +0,0 @@
+-old
+";
+
+        assert_eq!(git_diff_section_path(section), Some("src/old name.rs"));
+    }
+
+    #[test]
+    fn test_git_diff_section_path_binary_file_falls_back_to_header() {
+        let section = "\
+diff --git a/assets/icon large.png b/assets/icon large.png
+index 123..456 100644
+Binary files a/assets/icon large.png and b/assets/icon large.png differ
+";
+
+        assert_eq!(
+            git_diff_section_path(section),
+            Some("assets/icon large.png")
+        );
+    }
+
+    #[test]
+    fn test_git_diff_changed_paths_extracts_multiple_spaced_paths() {
+        let diff = "\
+diff --git a/src/has space.rs b/src/has space.rs
+--- a/src/has space.rs
++++ b/src/has space.rs
+@@ -1 +1 @@
+-old
++new
+diff --git a/docs/old note.md b/docs/old note.md
+--- a/docs/old note.md
++++ /dev/null
+@@ -1 +0,0 @@
+-old
+";
+
+        assert_eq!(
+            git_diff_changed_paths(diff),
+            vec![
+                "src/has space.rs".to_string(),
+                "docs/old note.md".to_string()
+            ]
+        );
     }
 
     #[test]

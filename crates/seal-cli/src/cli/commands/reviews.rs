@@ -8,7 +8,7 @@ use crate::cli::commands::helpers::{ensure_initialized, open_services};
 use crate::output::{Formatter, OutputFormat};
 use seal_core::events::VoteType;
 use seal_core::projection::{ReviewDetail, ThreadSummary};
-use seal_core::scm::ScmRepo;
+use seal_core::scm::{git_diff_section_path, ScmRepo};
 use seal_core::sealignore::{AllFilesIgnoredError, SealIgnore};
 
 /// Parse a --since value into a `DateTime`.
@@ -1079,32 +1079,30 @@ fn build_file_diffs(
 /// Returns a map from file path to the complete diff section for that file.
 fn split_diff_by_file(full_diff: &str) -> std::collections::HashMap<&str, &str> {
     let mut result = std::collections::HashMap::new();
-    let mut current_file: Option<&str> = None;
-    let mut current_start: usize = 0;
+    let mut current_start: Option<usize> = None;
 
     for (byte_offset, line) in line_byte_offsets(full_diff) {
         if line.starts_with("diff --git") {
             // Flush previous file
-            if let Some(file) = current_file {
-                let section = &full_diff[current_start..byte_offset];
+            if let Some(start) = current_start {
+                let section = &full_diff[start..byte_offset];
                 if !section.trim().is_empty() {
-                    result.insert(file, section);
+                    if let Some(file) = git_diff_section_path(section) {
+                        result.insert(file, section);
+                    }
                 }
             }
-            // Parse new file path: "diff --git a/path b/path"
-            current_file = line
-                .split_whitespace()
-                .nth(3)
-                .map(|s| s.trim_start_matches("b/"));
-            current_start = byte_offset;
+            current_start = Some(byte_offset);
         }
     }
 
     // Flush last file
-    if let Some(file) = current_file {
-        let section = &full_diff[current_start..];
+    if let Some(start) = current_start {
+        let section = &full_diff[start..];
         if !section.trim().is_empty() {
-            result.insert(file, section);
+            if let Some(file) = git_diff_section_path(section) {
+                result.insert(file, section);
+            }
         }
     }
 
@@ -1277,6 +1275,23 @@ diff --git a/src/lib.rs b/src/lib.rs
         let result = split_diff_by_file(diff);
         assert_eq!(result.len(), 1);
         assert!(result.contains_key("foo.rs"));
+    }
+
+    #[test]
+    fn test_split_diff_by_file_path_with_spaces() {
+        let diff = "\
+diff --git a/src/has space.rs b/src/has space.rs
+--- a/src/has space.rs
++++ b/src/has space.rs
+@@ -1 +1 @@
+-old
++new
+";
+
+        let result = split_diff_by_file(diff);
+        assert_eq!(result.len(), 1);
+        assert!(result.contains_key("src/has space.rs"));
+        assert!(result["src/has space.rs"].contains("+new"));
     }
 
     #[test]

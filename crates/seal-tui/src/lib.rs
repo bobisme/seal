@@ -396,12 +396,22 @@ fn process_event(event: &Event, model: &mut Model, ctx: &mut EventContext<'_>) -
 
         let comment_result = run_comment_editor(ctx.repo_path, &request);
 
-        if let Ok(Some(body)) = &comment_result {
-            if let Some(client) = ctx.client.as_ref() {
-                let persist_result = persist_comment(*client, ctx.repo_path, &request, body);
-                if persist_result.is_ok() {
-                    reload_review_data(model, *client, ctx.repo_path);
+        match comment_result {
+            Ok(Some(body)) => {
+                if let Some(client) = ctx.client.as_ref() {
+                    match persist_comment(*client, ctx.repo_path, &request, &body) {
+                        Ok(()) => reload_review_data(model, *client, ctx.repo_path),
+                        Err(e) => {
+                            model.flash_message = Some(format!("Comment failed: {e}"));
+                        }
+                    }
+                } else {
+                    model.flash_message = Some("Comment failed: no review client".to_string());
                 }
+            }
+            Ok(None) => {}
+            Err(e) => {
+                model.flash_message = Some(format!("Comment editor failed: {e}"));
             }
         }
 

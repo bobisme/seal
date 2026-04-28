@@ -8,7 +8,7 @@ use crate::cli::commands::helpers::{ensure_initialized, open_services, review_no
 use crate::output::{Formatter, OutputFormat};
 use seal_core::jj::drift::{calculate_drift, DriftResult};
 use seal_core::projection::ThreadSummary;
-use seal_core::scm::ScmRepo;
+use seal_core::scm::{git_diff_changed_paths, ScmRepo};
 use seal_core::sealignore::{AllFilesIgnoredError, SealIgnore};
 
 /// Thread status with drift information.
@@ -253,14 +253,7 @@ pub fn run_diff(
 
 /// Extract file names from a git diff output.
 fn extract_changed_files_from_diff(diff: &str) -> Vec<String> {
-    diff.lines()
-        .filter(|line| line.starts_with("diff --git"))
-        .filter_map(|line| {
-            // Format: diff --git a/path b/path
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            parts.get(3).map(|s| s.trim_start_matches("b/").to_string())
-        })
-        .collect()
+    git_diff_changed_paths(diff)
 }
 
 /// Group threads by file path.
@@ -288,4 +281,26 @@ fn group_threads_by_file(threads: &[ThreadSummary]) -> serde_json::Value {
             })
         })
         .collect::<Vec<_>>())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_changed_files_from_diff_allows_spaces() {
+        let diff = "\
+diff --git a/src/has space.rs b/src/has space.rs
+--- a/src/has space.rs
++++ b/src/has space.rs
+@@ -1 +1 @@
+-old
++new
+";
+
+        assert_eq!(
+            extract_changed_files_from_diff(diff),
+            vec!["src/has space.rs".to_string()]
+        );
+    }
 }

@@ -7,7 +7,7 @@ use anyhow::Result;
 
 use seal_core::core::{CoreContext, SealServices};
 use seal_core::events::CodeSelection;
-use seal_core::scm::{resolve_backend, ScmPreference};
+use seal_core::scm::{git_diff_section_path, resolve_backend, ScmPreference, ScmRepo};
 use seal_core::sealignore::SealIgnore;
 
 use crate::db::{
@@ -172,11 +172,14 @@ impl SealClient for CoreClient {
         let services = self.services()?;
         let agent = Self::comment_agent();
 
-        // Get the review's initial commit for thread creation
         let review = services
             .reviews()
             .get(review_id)
             .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let thread_commit = resolve_backend(&self.repo_root, ScmPreference::Auto).map_or_else(
+            |_| review.initial_commit.clone(),
+            |scm| resolve_review_target_commit(scm.as_ref(), &review),
+        );
 
         #[allow(clippy::cast_sign_loss)]
         let selection = match end_line {
@@ -191,7 +194,7 @@ impl SealClient for CoreClient {
                 file_path,
                 selection,
                 body,
-                review.initial_commit,
+                thread_commit,
                 Some(&agent),
             )
             .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -224,13 +227,7 @@ impl CoreClient {
             return Vec::new();
         };
 
-        // Resolve target commit
-        let target_commit = review
-            .final_commit
-            .clone()
-            .or_else(|| scm.commit_for_anchor(&review.scm_anchor).ok())
-            .or_else(|| scm.commit_for_anchor(&review.jj_change_id).ok())
-            .unwrap_or_else(|| review.initial_commit.clone());
+        let target_commit = resolve_review_target_commit(scm.as_ref(), review);
 
         let base_commit = scm
             .parent_commit(&target_commit)
@@ -308,8 +305,7 @@ impl CoreClient {
 /// Split a full git-format diff into per-file sections.
 fn split_diff_by_file(full_diff: &str) -> HashMap<&str, &str> {
     let mut result = HashMap::new();
-    let mut current_file: Option<&str> = None;
-    let mut current_start: usize = 0;
+    let mut current_start: Option<usize> = None;
     let mut offset = 0;
 
     for line in full_diff.lines() {
@@ -317,28 +313,40 @@ fn split_diff_by_file(full_diff: &str) -> HashMap<&str, &str> {
         offset += line.len() + 1; // +1 for newline
 
         if line.starts_with("diff --git") {
-            if let Some(file) = current_file {
-                let section = &full_diff[current_start..byte_offset];
+            if let Some(start) = current_start {
+                let section = &full_diff[start..byte_offset];
                 if !section.trim().is_empty() {
-                    result.insert(file, section);
+                    if let Some(file) = git_diff_section_path(section) {
+                        result.insert(file, section);
+                    }
                 }
             }
-            current_file = line
-                .split_whitespace()
-                .nth(3)
-                .map(|s| s.trim_start_matches("b/"));
-            current_start = byte_offset;
+            current_start = Some(byte_offset);
         }
     }
 
-    if let Some(file) = current_file {
-        let section = &full_diff[current_start..];
+    if let Some(start) = current_start {
+        let section = &full_diff[start..];
         if !section.trim().is_empty() {
-            result.insert(file, section);
+            if let Some(file) = git_diff_section_path(section) {
+                result.insert(file, section);
+            }
         }
     }
 
     result
+}
+
+fn resolve_review_target_commit(
+    scm: &dyn ScmRepo,
+    review: &seal_core::projection::ReviewDetail,
+) -> String {
+    review
+        .final_commit
+        .clone()
+        .or_else(|| scm.commit_for_anchor(&review.scm_anchor).ok())
+        .or_else(|| scm.commit_for_anchor(&review.jj_change_id).ok())
+        .unwrap_or_else(|| review.initial_commit.clone())
 }
 
 /// Parse unified diff hunk headers to extract new-side line ranges.
@@ -409,4 +417,25 @@ fn build_content_window(
         start_line: i64::from(start_line),
         lines: window_lines,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_split_diff_by_file_path_with_spaces() {
+        let diff = "\
+diff --git a/src/has space.rs b/src/has space.rs
+--- a/src/has space.rs
++++ b/src/has space.rs
+@@ -1 +1 @@
+-old
++new
+";
+
+        let result = split_diff_by_file(diff);
+        assert_eq!(result.len(), 1);
+        assert!(result.contains_key("src/has space.rs"));
+    }
 }
