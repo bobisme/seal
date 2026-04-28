@@ -85,3 +85,7 @@
 1777395970241079	seal-dev	itc:v3:AWKZ8kmeSSZmc0AAAAAAQbfVb1VtuwAAAAEwUw		item.move	bn-2l3z	{"state":"doing"}	blake3:uqdeYQAIIQLrlvpyZ0SnPDVywHXhxewo75X51EYIqH0
 1777395970244708	seal-dev	itc:v3:AWKZ8kmeSSZmc0AAAAAAQbfVb1VtuwAAAAEwVA		item.assign	bn-2l3z	{"action":"assign","agent":"seal-dev"}	blake3:5TGo5h2NVzs4BnBhxCntipFrRxw5wdKfhI_WkLkkn_w
 1777396134796678	seal-dev	itc:v3:AWKZ8kmeSSZmc0AAAAAAQbfVb1VtuwAAAAEwVQ		item.move	bn-2l3z	{"state":"done"}	blake3:auceBA5EzBadXpjjk3Uwc6BJDUbh-_KcjSvd3UJtms4
+1777413553437268	seal-dev	itc:v3:AWKZ8kmeSSZmc0AAAAAAQbfVb1VtuwAAAAEwVg		item.create	bn-32c5	{"description":"Bump crate versions, update changelog, regenerate lockfile, tag, push, and publish the v0.27.2 GitHub release.","kind":"task","title":"Release v0.27.2"}	blake3:naXyueiSwGYeJGpuKF3uBzm_cbInT2FVn6VcloNDMy8
+1777413561751388	seal-dev	itc:v3:AWKZ8kmeSSZmc0AAAAAAQbfVb1VtuwAAAAEwVw		item.move	bn-32c5	{"state":"doing"}	blake3:zYyYQ_zCQ6bYQQYhFHdj1oXJjULyfuyiaFTJrTLBgPc
+1777413561764452	seal-dev	itc:v3:AWKZ8kmeSSZmc0AAAAAAQbfVb1VtuwAAAAEwWA		item.assign	bn-32c5	{"action":"assign","agent":"seal-dev"}	blake3:H1AYRrK4DJGaaOyxzJCgHSoRZne96fFmYx8kqcTwCO0
+1777413747127152	seal-dev	itc:v3:AWKZ8kmeSSZmc0AAAAAAQbfVb1VtuwAAAAEwWQ		item.move	bn-32c5	{"state":"done"}	blake3:Tj2BB5eNbZBQEDEOQbNcwQII9HGPE7Ii2iW5FUqj7tc
