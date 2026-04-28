@@ -64,3 +64,4 @@
 1777344149669001	seal-dev	itc:v3:AWKZ8kmeSSZmc0AAAAAAQbfVb1VtuwAAAAEwPg		item.create	bn-z9z6	{"description":"Randomly explore and trace code paths, identify obvious issues, and fix them.","kind":"task","title":"Fresh-eyes code exploration fixes"}	blake3:h5FvUM8fRggw-4GkMuGCalE60nYmOWEmIyBjl9SP544
 1777344155643837	seal-dev	itc:v3:AWKZ8kmeSSZmc0AAAAAAQbfVb1VtuwAAAAEwPw		item.move	bn-z9z6	{"state":"doing"}	blake3:pUcShKHTIUQidwU95oqnW2FWKnBXbMUe3wQy-DCJlTc
 1777344155650513	seal-dev	itc:v3:AWKZ8kmeSSZmc0AAAAAAQbfVb1VtuwAAAAEwQA		item.assign	bn-z9z6	{"action":"assign","agent":"seal-dev"}	blake3:2JgwnQKum0GuiCDvxTjhEPpEFHqQ8WXEIoRclNdUKUY
+1777344476342255	seal-dev	itc:v3:AWKZ8kmeSSZmc0AAAAAAQbfVb1VtuwAAAAEwQQ		item.move	bn-z9z6	{"state":"done"}	blake3:dENQ4-KXQjEoyYJ0sOzsUP5HGT0uFwqK0OuwB_p1KR4
