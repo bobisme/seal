@@ -31,12 +31,16 @@ const IDENTITY_VARS: &[&str] = &[
 /// Returns error if no identity can be determined.
 pub fn get_agent_identity(explicit: Option<&str>) -> Result<String> {
     if let Some(name) = explicit {
-        return Ok(name.to_string());
+        return normalize_identity(name).ok_or_else(|| {
+            anyhow::anyhow!(
+                "Agent identity cannot be empty. Use --agent <name> or set BOTSEAL_AGENT/SEAL_AGENT/AGENT/BOTBUS_AGENT."
+            )
+        });
     }
 
     for var in IDENTITY_VARS {
         if let Ok(name) = env::var(var) {
-            if !name.is_empty() {
+            if let Some(name) = normalize_identity(&name) {
                 return Ok(name);
             }
         }
@@ -45,7 +49,7 @@ pub fn get_agent_identity(explicit: Option<&str>) -> Result<String> {
     // Fall back to $USER only in interactive (TTY) sessions
     if std::io::stdin().is_terminal() {
         if let Ok(name) = env::var("USER") {
-            if !name.is_empty() {
+            if let Some(name) = normalize_identity(&name) {
                 return Ok(name);
             }
         }
@@ -56,6 +60,15 @@ pub fn get_agent_identity(explicit: Option<&str>) -> Result<String> {
     )
 }
 
+fn normalize_identity(name: &str) -> Option<String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -63,6 +76,18 @@ mod tests {
     #[test]
     fn test_explicit_override() {
         let identity = get_agent_identity(Some("explicit_agent")).unwrap();
+        assert_eq!(identity, "explicit_agent");
+    }
+
+    #[test]
+    fn test_explicit_override_rejects_blank() {
+        assert!(get_agent_identity(Some("")).is_err());
+        assert!(get_agent_identity(Some("   ")).is_err());
+    }
+
+    #[test]
+    fn test_explicit_override_trims_whitespace() {
+        let identity = get_agent_identity(Some("  explicit_agent  ")).unwrap();
         assert_eq!(identity, "explicit_agent");
     }
 }

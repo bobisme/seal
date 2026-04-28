@@ -193,10 +193,18 @@ fn format_body(result: &SarifResult, tool_name: &str, level: Level, fingerprint:
 }
 
 fn body_contains_fingerprint(body: &str, fingerprint: &str) -> bool {
-    // Look for "<!-- sarif-fp: <fingerprint> -->" — match on the fingerprint substring
-    // inside a sarif-fp marker comment.
-    body.lines()
-        .any(|line| line.contains(FINGERPRINT_TAG) && line.contains(fingerprint))
+    body.lines().any(|line| {
+        let Some((_, marker_body)) = line.split_once(FINGERPRINT_TAG) else {
+            return false;
+        };
+
+        marker_body
+            .trim()
+            .strip_suffix("-->")
+            .unwrap_or_else(|| marker_body.trim())
+            .trim()
+            == fingerprint
+    })
 }
 
 // --------------------------------------------------------------------------
@@ -593,6 +601,18 @@ mod tests {
         // Body should be human-readable
         assert!(body.contains("[codeql]"));
         assert!(body.contains("do not"));
+    }
+
+    #[test]
+    fn body_contains_fingerprint_requires_exact_marker_value() {
+        let body = "<!-- sarif-fp: codeql:primary:abc123 -->";
+
+        assert!(body_contains_fingerprint(body, "codeql:primary:abc123"));
+        assert!(!body_contains_fingerprint(body, "codeql:primary:abc"));
+        assert!(!body_contains_fingerprint(
+            "<!-- sarif-fp: codeql:primary:abc123-extra -->",
+            "codeql:primary:abc123"
+        ));
     }
 
     #[test]

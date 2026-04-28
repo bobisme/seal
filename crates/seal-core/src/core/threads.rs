@@ -9,6 +9,32 @@ use crate::projection::{ProjectionDb, ThreadDetail, ThreadSummary};
 
 use super::{CoreContext, CoreError, CoreResult};
 
+pub(crate) fn validate_selection(selection: &CodeSelection) -> CoreResult<()> {
+    match selection {
+        CodeSelection::Line { line } => {
+            if *line == 0 {
+                return Err(CoreError::InvalidCodeSelection {
+                    reason: "line numbers must be 1-based".to_string(),
+                });
+            }
+        }
+        CodeSelection::Range { start, end } => {
+            if *start == 0 || *end == 0 {
+                return Err(CoreError::InvalidCodeSelection {
+                    reason: "line numbers must be 1-based".to_string(),
+                });
+            }
+            if start > end {
+                return Err(CoreError::InvalidCodeSelection {
+                    reason: format!("range start ({start}) must be <= end ({end})"),
+                });
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Service for thread operations.
 pub struct ThreadService<'a> {
     ctx: &'a CoreContext,
@@ -81,6 +107,7 @@ impl<'a> ThreadService<'a> {
         author: Option<&str>,
     ) -> CoreResult<String> {
         self.ensure_review_accepts_thread_changes(review_id)?;
+        validate_selection(&selection)?;
 
         let thread_id = new_thread_id();
         let author_str = get_agent_identity(author).map_err(CoreError::Internal)?;
@@ -296,6 +323,26 @@ mod tests {
             .expect_err("completed review should fail");
 
         assert!(matches!(err, CoreError::InvalidReviewStatus { .. }));
+    }
+
+    #[test]
+    fn create_rejects_invalid_selection() {
+        let (_dir, ctx) = init_context();
+        append_review_created(&ctx, "cr-open");
+        let services = ctx.services().expect("services");
+
+        let err = services
+            .threads()
+            .create(
+                "cr-open",
+                "src/lib.rs",
+                CodeSelection::range(8, 3),
+                "abc123".to_string(),
+                Some("alice"),
+            )
+            .expect_err("invalid selection should fail");
+
+        assert!(matches!(err, CoreError::InvalidCodeSelection { .. }));
     }
 
     #[test]

@@ -1,13 +1,17 @@
 //! ID generation for reviews and threads.
 //!
-//! Uses short, human-readable slugs: cr-xxx, th-xxx
+//! Uses short, human-readable slugs: cr-xxxxxx, th-xxxxxx
 //! Comments use thread child IDs: th-xxx.1, th-xxx.2, etc.
 //! Powered by terseid for adaptive-length, collision-resistant IDs.
 
 use terseid::{parse_id, IdConfig, IdGenerator};
 
-/// Length of the random suffix (in base36 chars)
-const HASH_LENGTH: usize = 4;
+/// Length of the random suffix (in base36 chars).
+///
+/// Four characters made collisions plausible in normal stress tests and in
+/// repos with many reviews. Six keeps IDs compact while greatly expanding the
+/// generated namespace. Validators remain backward-compatible with older IDs.
+const HASH_LENGTH: usize = 6;
 
 fn review_generator() -> IdGenerator {
     IdGenerator::new(IdConfig::new("cr"))

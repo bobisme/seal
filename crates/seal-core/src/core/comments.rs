@@ -7,6 +7,7 @@ use crate::events::{
 use crate::log::{open_or_create_review, AppendLog};
 use crate::projection::{Comment, ProjectionDb};
 
+use super::threads::validate_selection;
 use super::{CoreContext, CoreError, CoreResult};
 
 /// Result of adding a comment, including IDs for the caller.
@@ -112,6 +113,8 @@ impl<'a> CommentService<'a> {
         commit_hash: String,
         author: Option<&str>,
     ) -> CoreResult<AddCommentResult> {
+        validate_selection(&selection)?;
+
         // Verify review exists and is open or approved
         let review = self
             .db
@@ -196,5 +199,70 @@ impl<'a> CommentService<'a> {
         self.db
             .list_comments(thread_id)
             .map_err(CoreError::Internal)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::events::ReviewCreated;
+    use tempfile::{tempdir, TempDir};
+
+    fn init_context() -> (TempDir, CoreContext) {
+        let dir = tempdir().expect("tempdir");
+        let seal_dir = dir.path().join(".seal");
+        std::fs::create_dir(&seal_dir).expect("create .seal");
+        std::fs::write(seal_dir.join("version"), "2\n").expect("write version");
+        std::fs::create_dir(seal_dir.join("reviews")).expect("create reviews dir");
+
+        let ctx = CoreContext::new(dir.path(), &seal_dir.join("index.db")).expect("context");
+        (dir, ctx)
+    }
+
+    fn append_review_created(ctx: &CoreContext, review_id: &str) {
+        let event = EventEnvelope::new(
+            "alice",
+            Event::ReviewCreated(ReviewCreated {
+                review_id: review_id.to_string(),
+                jj_change_id: "change-id".to_string(),
+                scm_kind: Some("git".to_string()),
+                scm_anchor: Some("refs/heads/main".to_string()),
+                initial_commit: "abc123".to_string(),
+                title: "Review".to_string(),
+                description: None,
+            }),
+        );
+        open_or_create_review(ctx.seal_root(), review_id)
+            .expect("review log")
+            .append(&event)
+            .expect("append review");
+    }
+
+    #[test]
+    fn add_to_review_rejects_zero_line_selection_without_writing_thread() {
+        let (_dir, ctx) = init_context();
+        append_review_created(&ctx, "cr-open");
+        let services = ctx.services().expect("services");
+
+        let err = services
+            .comments()
+            .add_to_review(
+                "cr-open",
+                "src/lib.rs",
+                CodeSelection::line(0),
+                "body",
+                "abc123".to_string(),
+                Some("alice"),
+            )
+            .expect_err("invalid selection should fail");
+
+        assert!(matches!(err, CoreError::InvalidCodeSelection { .. }));
+
+        let services = ctx.services().expect("services");
+        let threads = services
+            .threads()
+            .list("cr-open", None, None)
+            .expect("list threads");
+        assert!(threads.is_empty());
     }
 }

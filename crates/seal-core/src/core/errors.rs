@@ -40,6 +40,10 @@ pub enum CoreError {
         file_path: String,
     },
 
+    /// A code selection used invalid line numbers.
+    #[error("Invalid code selection: {reason}")]
+    InvalidCodeSelection { reason: String },
+
     /// An internal storage or database error.
     #[error(transparent)]
     Internal(#[from] anyhow::Error),
