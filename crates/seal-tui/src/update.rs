@@ -1076,38 +1076,6 @@ fn update_active_file_from_scroll(model: &mut Model) {
     model.needs_redraw = true;
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::config::UiConfig;
-
-    #[test]
-    fn resolve_thread_sets_pending_status_change() {
-        let mut model = Model::new(120, 40, UiConfig::default());
-
-        update(&mut model, Message::ResolveThread("th-abc1".to_string()));
-
-        let pending = model
-            .pending_thread_status_change
-            .expect("resolve should queue a backend update");
-        assert_eq!(pending.thread_id, "th-abc1");
-        assert_eq!(pending.action, ThreadStatusAction::Resolve);
-    }
-
-    #[test]
-    fn reopen_thread_sets_pending_status_change() {
-        let mut model = Model::new(120, 40, UiConfig::default());
-
-        update(&mut model, Message::ReopenThread("th-abc1".to_string()));
-
-        let pending = model
-            .pending_thread_status_change
-            .expect("reopen should queue a backend update");
-        assert_eq!(pending.thread_id, "th-abc1");
-        assert_eq!(pending.action, ThreadStatusAction::Reopen);
-    }
-}
-
 fn sync_sidebar_from_active(model: &mut Model) {
     let items = model.sidebar_items();
     let mut target = active_thread_from_scroll(model).and_then(|thread_id| {
@@ -1353,4 +1321,36 @@ fn filter_commands(query: &str) -> Vec<crate::command::CommandSpec> {
                 .all(|term| name_lower.contains(term.as_str()) || cat_lower.contains(term.as_str()))
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::UiConfig;
+
+    #[test]
+    fn resolve_thread_sets_pending_status_change() {
+        let mut model = Model::new(120, 40, UiConfig::default());
+
+        update(&mut model, Message::ResolveThread("th-abc1".to_string()));
+
+        let pending = model
+            .pending_thread_status_change
+            .expect("resolve should queue a backend update");
+        assert_eq!(pending.thread_id, "th-abc1");
+        assert_eq!(pending.action, ThreadStatusAction::Resolve);
+    }
+
+    #[test]
+    fn reopen_thread_sets_pending_status_change() {
+        let mut model = Model::new(120, 40, UiConfig::default());
+
+        update(&mut model, Message::ReopenThread("th-abc1".to_string()));
+
+        let pending = model
+            .pending_thread_status_change
+            .expect("reopen should queue a backend update");
+        assert_eq!(pending.thread_id, "th-abc1");
+        assert_eq!(pending.action, ThreadStatusAction::Reopen);
+    }
 }

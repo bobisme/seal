@@ -203,7 +203,7 @@ pub const fn current_traceparent() -> Option<String> {
     None
 }
 
-/// If `TRACEPARENT` is set, parse it and install as the current OTel context.
+/// If `TRACEPARENT` is set, parse it and install as the current `OTel` context.
 #[cfg(feature = "otel")]
 fn install_parent_context() {
     use opentelemetry::propagation::TextMapPropagator as _;
@@ -215,9 +215,9 @@ fn install_parent_context() {
         carrier.insert("traceparent".to_string(), traceparent);
         let propagator = TraceContextPropagator::new();
         let cx = propagator.extract(&carrier);
-        let _guard = cx.attach();
+        let guard = cx.attach();
         // Intentionally leaked: context stays active for process lifetime.
-        std::mem::forget(_guard);
+        std::mem::forget(guard);
     }
 }
 
