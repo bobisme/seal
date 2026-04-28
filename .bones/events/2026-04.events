@@ -65,3 +65,7 @@
 1777344155643837	seal-dev	itc:v3:AWKZ8kmeSSZmc0AAAAAAQbfVb1VtuwAAAAEwPw		item.move	bn-z9z6	{"state":"doing"}	blake3:pUcShKHTIUQidwU95oqnW2FWKnBXbMUe3wQy-DCJlTc
 1777344155650513	seal-dev	itc:v3:AWKZ8kmeSSZmc0AAAAAAQbfVb1VtuwAAAAEwQA		item.assign	bn-z9z6	{"action":"assign","agent":"seal-dev"}	blake3:2JgwnQKum0GuiCDvxTjhEPpEFHqQ8WXEIoRclNdUKUY
 1777344476342255	seal-dev	itc:v3:AWKZ8kmeSSZmc0AAAAAAQbfVb1VtuwAAAAEwQQ		item.move	bn-z9z6	{"state":"done"}	blake3:dENQ4-KXQjEoyYJ0sOzsUP5HGT0uFwqK0OuwB_p1KR4
+1777345843810820	seal-dev	itc:v3:AWKZ8kmeSSZmc0AAAAAAQbfVb1VtuwAAAAEwQg		item.create	bn-350a	{"description":"Explore code paths in seal, identify obvious bugs or mistakes, and correct them with focused tests.","kind":"task","title":"Fix fresh-eyes code issues"}	blake3:ktiB9uE3bVMTSopzXoVCgW8Rn_LNkR5qz6RcxSDxDH8
+1777346359289310	seal-dev	itc:v3:AWKZ8kmeSSZmc0AAAAAAQbfVb1VtuwAAAAEwQw		item.move	bn-350a	{"state":"doing"}	blake3:6NWEpCfmdy_ob6qqOgb_9_tgUYMfXm5tHXggfBYCmm0
+1777346359329648	seal-dev	itc:v3:AWKZ8kmeSSZmc0AAAAAAQbfVb1VtuwAAAAEwRA		item.assign	bn-350a	{"action":"assign","agent":"seal-dev"}	blake3:hbAQ0tMxn8JU-Kw2BA3nPokZsfuqTKtjFWJOfKUIVp8
+1777346494391287	seal-dev	itc:v3:AWKZ8kmeSSZmc0AAAAAAQbfVb1VtuwAAAAEwRQ		item.move	bn-350a	{"state":"done"}	blake3:Eia316alym2wTeryu_m3Ac75qvR5RJah7SJ1YwGis9M
