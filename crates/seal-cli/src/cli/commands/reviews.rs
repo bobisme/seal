@@ -24,25 +24,33 @@ pub fn parse_since(value: &str) -> Result<DateTime<Utc>> {
     // Try relative duration
     let value = value.trim().to_lowercase();
     if let Some(num_str) = value.strip_suffix('h') {
-        let hours: i64 = num_str.parse().context("Invalid hours")?;
+        let hours = parse_positive_duration(num_str, "hours")?;
         return Ok(Utc::now() - Duration::hours(hours));
     }
     if let Some(num_str) = value.strip_suffix('d') {
-        let days: i64 = num_str.parse().context("Invalid days")?;
+        let days = parse_positive_duration(num_str, "days")?;
         return Ok(Utc::now() - Duration::days(days));
     }
     if let Some(num_str) = value.strip_suffix('m') {
-        let mins: i64 = num_str.parse().context("Invalid minutes")?;
+        let mins = parse_positive_duration(num_str, "minutes")?;
         return Ok(Utc::now() - Duration::minutes(mins));
     }
     if let Some(num_str) = value.strip_suffix('w') {
-        let weeks: i64 = num_str.parse().context("Invalid weeks")?;
+        let weeks = parse_positive_duration(num_str, "weeks")?;
         return Ok(Utc::now() - Duration::weeks(weeks));
     }
 
     bail!(
         "Invalid --since format. Use ISO 8601 (2026-01-27T23:00:00Z) or relative (1h, 2d, 30m, 1w)"
     )
+}
+
+fn parse_positive_duration(value: &str, unit: &str) -> Result<i64> {
+    let amount: i64 = value.parse().with_context(|| format!("Invalid {unit}"))?;
+    if amount <= 0 {
+        bail!("Relative --since duration must be positive");
+    }
+    Ok(amount)
 }
 
 /// Create a new review for the current jj change.
@@ -952,10 +960,12 @@ fn extract_context_from_str(
         return None;
     }
 
-    let anchor_start = anchor_start.min(total_lines);
-    let anchor_end = anchor_end.min(total_lines);
+    if anchor_start > total_lines || anchor_end > total_lines {
+        return None;
+    }
+
     let start_line = anchor_start.saturating_sub(context_lines).max(1);
-    let end_line = (anchor_end + context_lines).min(total_lines);
+    let end_line = anchor_end.saturating_add(context_lines).min(total_lines);
 
     let mut lines = Vec::new();
     for line_num in start_line..=end_line {
@@ -1182,9 +1192,16 @@ fn build_content_window_from_cache(
         .max()
         .unwrap_or(min_line);
 
+    if min_line == 0 || min_line > total {
+        return None;
+    }
+
     let padding = 20u32;
     let start = min_line.saturating_sub(padding).max(1);
-    let end = (max_line + padding).min(total);
+    let end = max_line.saturating_add(padding).min(total);
+    if start > end {
+        return None;
+    }
 
     let lines: Vec<String> = ((start - 1) as usize..end as usize)
         .map(|i| file_lines.get(i).unwrap_or(&"").to_string())
@@ -1199,6 +1216,84 @@ fn build_content_window_from_cache(
 #[cfg(test)]
 mod diff_tests {
     use super::*;
+
+    fn thread(file_path: &str, start: i64, end: Option<i64>) -> ThreadSummary {
+        ThreadSummary {
+            thread_id: "th-test".to_string(),
+            file_path: file_path.to_string(),
+            selection_start: start,
+            selection_end: end,
+            status: "open".to_string(),
+            comment_count: 1,
+        }
+    }
+
+    #[test]
+    fn test_parse_since_rejects_non_positive_relative_duration() {
+        assert!(parse_since("0m").is_err());
+        assert!(parse_since("-1h").is_err());
+    }
+
+    #[test]
+    fn test_parse_since_accepts_positive_relative_duration() {
+        assert!(parse_since("1h").is_ok());
+        assert!(parse_since("2d").is_ok());
+    }
+
+    #[test]
+    fn test_extract_context_from_str_rejects_out_of_bounds_anchor() {
+        let contents = "line1\nline2\nline3\n";
+
+        assert!(extract_context_from_str(contents, 4, 4, 1).is_none());
+        assert!(extract_context_from_str(contents, 2, 4, 1).is_none());
+    }
+
+    #[test]
+    fn test_extract_context_from_str_returns_valid_window() {
+        let contents = "line1\nline2\nline3\nline4\n";
+
+        let context = extract_context_from_str(contents, 2, 3, 1).unwrap();
+
+        assert_eq!(context.start_line, 1);
+        assert_eq!(context.end_line, 4);
+        assert_eq!(context.anchor_start, 2);
+        assert_eq!(context.anchor_end, 3);
+        assert_eq!(context.lines.len(), 4);
+    }
+
+    #[test]
+    fn test_build_content_window_from_cache_rejects_out_of_bounds_anchor() {
+        let mut cache = std::collections::HashMap::new();
+        cache.insert(
+            "src/lib.rs".to_string(),
+            "line1\nline2\nline3\n".to_string(),
+        );
+        let t = thread("src/lib.rs", 4, None);
+
+        let window = build_content_window_from_cache(&cache, "src/lib.rs", &[&t]);
+
+        assert!(window.is_none());
+    }
+
+    #[test]
+    fn test_build_content_window_from_cache_returns_valid_window() {
+        let mut cache = std::collections::HashMap::new();
+        cache.insert(
+            "src/lib.rs".to_string(),
+            (1..=30)
+                .map(|line| format!("line {line}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        let t = thread("src/lib.rs", 25, None);
+
+        let window = build_content_window_from_cache(&cache, "src/lib.rs", &[&t]).unwrap();
+
+        assert_eq!(window.start_line, 5);
+        assert_eq!(window.lines.len(), 26);
+        assert_eq!(window.lines[0], "line 5");
+        assert_eq!(window.lines[25], "line 30");
+    }
 
     #[test]
     fn test_parse_hunk_ranges_standard() {
