@@ -64,6 +64,36 @@ fn legacy_events_path(seal_root: &Path) -> std::path::PathBuf {
     seal_root.join(".seal").join("events.jsonl")
 }
 
+fn ensure_valid_migration_targets<'a>(
+    review_ids: impl IntoIterator<Item = &'a String>,
+) -> Result<()> {
+    for review_id in review_ids {
+        if !is_legacy_review_id(review_id) {
+            bail!(
+                "Invalid review_id '{review_id}' found in events — refusing to create path. \
+                 Expected format: cr-XXXX"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn ensure_backup_path_available(legacy_path: &Path, backup: bool) -> Result<()> {
+    if !backup {
+        return Ok(());
+    }
+
+    let backup_path = legacy_path.with_extension("jsonl.v1.backup");
+    if backup_path.exists() {
+        bail!(
+            "Backup already exists: {}\n  Move or remove it before running migration again.",
+            backup_path.display()
+        );
+    }
+
+    Ok(())
+}
+
 /// Run the migrate command.
 pub fn run_migrate(
     seal_root: &Path,
@@ -222,14 +252,11 @@ pub fn run_migrate(
         return Ok(());
     }
 
+    ensure_valid_migration_targets(events_by_review.keys())?;
+    ensure_backup_path_available(&legacy_path, backup)?;
+
     // Perform migration: write events to per-review logs
     for (review_id, review_events) in &events_by_review {
-        if !is_legacy_review_id(review_id) {
-            bail!(
-                "Invalid review_id '{review_id}' found in events — refusing to create path. \
-                 Expected format: cr-XXXX"
-            );
-        }
         let log = open_or_create_review(seal_root, review_id)?;
 
         // Sort by timestamp (should already be sorted, but be safe)
@@ -343,14 +370,9 @@ fn run_remigrate_from_backup(seal_root: &Path, dry_run: bool, format: OutputForm
 
     // For each review, read existing per-review log and find missing events
     let mut total_recovered = 0usize;
+    ensure_valid_migration_targets(events_by_review.keys())?;
 
     for (review_id, backup_review_events) in &events_by_review {
-        if !is_legacy_review_id(review_id) {
-            bail!(
-                "Invalid review_id '{review_id}' found in backup — refusing to create path. \
-                 Expected format: cr-XXXX"
-            );
-        }
         let log = open_or_create_review(seal_root, review_id)?;
         let existing_events = log.read_all().unwrap_or_default();
 
@@ -760,6 +782,47 @@ mod tests {
     }
 
     #[test]
+    fn test_remigrate_rejects_invalid_review_id_before_partial_writes() {
+        let dir = tempdir().unwrap();
+        let seal_root = dir.path();
+
+        let seal_dir = seal_root.join(".seal");
+        fs::create_dir(&seal_dir).unwrap();
+        fs::write(seal_dir.join("version"), "2\n").unwrap();
+
+        let backup_path = seal_dir.join("events.jsonl.v1.backup");
+        let backup_log = open_or_create(&backup_path).unwrap();
+        backup_log.append(&make_review_created("cr-001")).unwrap();
+        backup_log
+            .append(&EventEnvelope::new(
+                "test_agent",
+                Event::ReviewCreated(ReviewCreated {
+                    review_id: "../../../tmp/evil".to_string(),
+                    jj_change_id: "change123".to_string(),
+                    scm_kind: Some("jj".to_string()),
+                    scm_anchor: Some("change123".to_string()),
+                    initial_commit: "commit456".to_string(),
+                    title: "Malicious review".to_string(),
+                    description: None,
+                }),
+            ))
+            .unwrap();
+
+        let result = run_migrate(seal_root, false, true, true, OutputFormat::Text);
+
+        assert!(result.is_err(), "Should reject invalid review_id");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Invalid review_id"),
+            "Error should mention invalid review_id, got: {err}"
+        );
+        assert!(
+            !seal_dir.join("reviews").exists(),
+            "re-migration should not write earlier valid review logs before validation"
+        );
+    }
+
+    #[test]
     fn test_migrate_no_backup() {
         let dir = tempdir().unwrap();
         let seal_root = dir.path();
@@ -778,6 +841,42 @@ mod tests {
         // Original file should be gone, no backup
         assert!(!legacy_path.exists());
         assert!(!legacy_path.with_extension("jsonl.v1.backup").exists());
+    }
+
+    #[test]
+    fn test_migrate_rejects_existing_backup_before_writing_logs() {
+        let dir = tempdir().unwrap();
+        let seal_root = dir.path();
+
+        let seal_dir = seal_root.join(".seal");
+        fs::create_dir(&seal_dir).unwrap();
+
+        let legacy_path = seal_dir.join("events.jsonl");
+        let log = open_or_create(&legacy_path).unwrap();
+        log.append(&make_review_created("cr-001")).unwrap();
+        fs::write(
+            legacy_path.with_extension("jsonl.v1.backup"),
+            "existing backup\n",
+        )
+        .unwrap();
+
+        let result = run_migrate(seal_root, false, true, false, OutputFormat::Text);
+
+        assert!(result.is_err(), "Should reject existing backup path");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Backup already exists"),
+            "Error should mention existing backup, got: {err}"
+        );
+        assert!(legacy_path.exists(), "legacy events file should remain");
+        assert!(
+            !seal_dir.join("reviews").exists(),
+            "migration should not create review logs before backup validation"
+        );
+        assert!(
+            !seal_dir.join("version").exists(),
+            "migration should not write version before backup validation"
+        );
     }
 
     /// Regression test: crafted `review_id` with path traversal must be rejected.
@@ -813,6 +912,50 @@ mod tests {
         assert!(
             err.contains("Invalid review_id"),
             "Error should mention invalid review_id, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_migrate_rejects_invalid_review_id_before_partial_writes() {
+        let dir = tempdir().unwrap();
+        let seal_root = dir.path();
+
+        let seal_dir = seal_root.join(".seal");
+        fs::create_dir(&seal_dir).unwrap();
+
+        let legacy_path = seal_dir.join("events.jsonl");
+        let log = open_or_create(&legacy_path).unwrap();
+        log.append(&make_review_created("cr-001")).unwrap();
+        log.append(&EventEnvelope::new(
+            "test_agent",
+            Event::ReviewCreated(ReviewCreated {
+                review_id: "../../../tmp/evil".to_string(),
+                jj_change_id: "change123".to_string(),
+                scm_kind: Some("jj".to_string()),
+                scm_anchor: Some("change123".to_string()),
+                initial_commit: "commit456".to_string(),
+                title: "Malicious review".to_string(),
+                description: None,
+            }),
+        ))
+        .unwrap();
+
+        let result = run_migrate(seal_root, false, true, false, OutputFormat::Text);
+
+        assert!(result.is_err(), "Should reject invalid review_id");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Invalid review_id"),
+            "Error should mention invalid review_id, got: {err}"
+        );
+        assert!(legacy_path.exists(), "legacy events file should remain");
+        assert!(
+            !seal_dir.join("reviews").exists(),
+            "migration should not create logs for earlier valid reviews before validation"
+        );
+        assert!(
+            !seal_dir.join("version").exists(),
+            "migration should not write version after failed validation"
         );
     }
 }
