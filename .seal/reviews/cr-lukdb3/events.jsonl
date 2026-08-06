@@ -6,3 +6,4 @@
 {"ts":"2026-08-06T20:57:24.702822188Z","author":"seal-reviewer-core","event":"ReviewApproved","data":{"review_id":"cr-lukdb3"}}
 {"ts":"2026-08-06T20:58:08.368216877Z","author":"console-dev","event":"CommentAdded","data":{"comment_id":"th-5qsdcx.2","thread_id":"th-5qsdcx","body":"Agreed this is a useful cleanup. Keeping the loop mirrored in this focused bug fix preserves identical path parsing with changed_files; a shared section iterator can be extracted separately without expanding the payload-leak patch."}}
 {"ts":"2026-08-06T20:58:08.414710927Z","author":"console-dev","event":"ThreadResolved","data":{"thread_id":"th-5qsdcx","reason":"Acknowledged as non-blocking follow-up; current fix intentionally mirrors the established parser."}}
+{"ts":"2026-08-06T20:59:06.329613305Z","author":"console-dev","event":"ReviewMerged","data":{"review_id":"cr-lukdb3","final_commit":"5602f062c10e"}}
