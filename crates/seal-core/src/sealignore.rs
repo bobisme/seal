@@ -6,6 +6,8 @@
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use std::path::Path;
 
+use crate::scm::git_diff_section_path;
+
 /// Hard-coded patterns that are always excluded from reviews.
 /// These are excluded regardless of `.sealignore` contents.
 const HARD_IGNORED: &[&str] = &[
@@ -77,6 +79,51 @@ impl SealIgnore {
         let filtered: Vec<String> = files.into_iter().filter(|f| !self.is_ignored(f)).collect();
         let ignored_count = original_count - filtered.len();
         (filtered, ignored_count)
+    }
+
+    /// Filter ignored file sections from a git-format diff.
+    ///
+    /// Diff payloads must be filtered independently from changed-file metadata:
+    /// callers commonly serialize both, and filtering only the metadata can leak
+    /// large generated files into reviewer context. Unparseable content outside a
+    /// `diff --git` section is omitted so ignore handling fails closed.
+    #[must_use]
+    pub fn filter_diff(&self, diff: &str) -> String {
+        let mut filtered = String::new();
+        let mut current_start = None;
+        let mut offset = 0;
+
+        for line in diff.lines() {
+            let byte_offset = offset;
+            offset += line.len() + 1;
+
+            if line.starts_with("diff --git") {
+                if let Some(start) = current_start {
+                    self.append_reviewable_section(&mut filtered, &diff[start..byte_offset]);
+                }
+                current_start = Some(byte_offset);
+            }
+        }
+
+        if let Some(start) = current_start {
+            self.append_reviewable_section(&mut filtered, &diff[start..]);
+        }
+
+        filtered
+    }
+
+    fn append_reviewable_section(&self, output: &mut String, section: &str) {
+        let Some(path) = git_diff_section_path(section) else {
+            return;
+        };
+        if self.is_ignored(path) {
+            return;
+        }
+
+        output.push_str(section);
+        if !section.ends_with('\n') {
+            output.push('\n');
+        }
     }
 
     /// Check if a .sealignore file exists in the repo.
@@ -181,6 +228,34 @@ mod tests {
 
         assert_eq!(ignored_count, 2);
         assert_eq!(filtered, vec!["src/main.rs", "README.md"]);
+    }
+
+    #[test]
+    fn test_filter_diff_removes_entire_ignored_section() {
+        let temp = TempDir::new().unwrap();
+        fs::write(temp.path().join(".sealignore"), "web/engine.js\n").unwrap();
+        let ignore = SealIgnore::load(temp.path());
+        let diff = "\
+diff --git a/src/main.rs b/src/main.rs
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -1 +1 @@
+-old
++kept-change
+diff --git a/web/engine.js b/web/engine.js
+--- a/web/engine.js
++++ b/web/engine.js
+@@ -1 +1 @@
+-old
++IGNORED_MINIFIED_PAYLOAD
+";
+
+        let filtered = ignore.filter_diff(diff);
+
+        assert!(filtered.contains("src/main.rs"));
+        assert!(filtered.contains("kept-change"));
+        assert!(!filtered.contains("web/engine.js"));
+        assert!(!filtered.contains("IGNORED_MINIFIED_PAYLOAD"));
     }
 
     #[test]

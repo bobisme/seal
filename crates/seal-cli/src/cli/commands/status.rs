@@ -230,8 +230,18 @@ pub fn run_diff(
         .into());
     }
 
+    // File metadata and the rendered patch are separate output fields. Filter
+    // both so ignored generated files cannot consume reviewer context through
+    // the serialized diff payload.
+    let diff = sealignore.filter_diff(&diff);
+
     // Get threads for context
-    let threads = services.threads().list(review_id, None, None)?;
+    let threads: Vec<_> = services
+        .threads()
+        .list(review_id, None, None)?
+        .into_iter()
+        .filter(|thread| !sealignore.is_ignored(&thread.file_path))
+        .collect();
 
     // Build structured output
     let result = serde_json::json!({
@@ -286,6 +296,8 @@ fn group_threads_by_file(threads: &[ThreadSummary]) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use tempfile::TempDir;
 
     #[test]
     fn test_extract_changed_files_from_diff_allows_spaces() {
@@ -302,5 +314,34 @@ diff --git a/src/has space.rs b/src/has space.rs
             extract_changed_files_from_diff(diff),
             vec!["src/has space.rs".to_string()]
         );
+    }
+
+    #[test]
+    fn ignored_large_diff_payload_is_absent_from_every_output_format() {
+        let temp = TempDir::new().unwrap();
+        fs::write(temp.path().join(".sealignore"), "web/engine.js\n").unwrap();
+        let sealignore = SealIgnore::load(temp.path());
+        let generated_payload = format!(
+            "diff --git a/web/engine.js b/web/engine.js\n--- a/web/engine.js\n+++ b/web/engine.js\n@@ -1 +1 @@\n-old\n+{}IGNORED_SENTINEL\n",
+            "x".repeat(2_100_000)
+        );
+        let reviewable_diff = "diff --git a/src/main.rs b/src/main.rs\n--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1 +1 @@\n-old\n+REVIEWABLE_SENTINEL\n";
+        let full_diff = format!("{reviewable_diff}{generated_payload}");
+        let filtered_diff = sealignore.filter_diff(&full_diff);
+        let result = serde_json::json!({
+            "changed_files": ["src/main.rs"],
+            "diff": filtered_diff,
+        });
+
+        for format in [OutputFormat::Text, OutputFormat::Json, OutputFormat::Pretty] {
+            let output = Formatter::new(format).format(&result).unwrap();
+            assert!(output.contains("REVIEWABLE_SENTINEL"), "format {format:?}");
+            assert!(!output.contains("web/engine.js"), "format {format:?}");
+            assert!(!output.contains("IGNORED_SENTINEL"), "format {format:?}");
+            assert!(
+                output.len() < 10_000,
+                "format {format:?} leaked the large payload"
+            );
+        }
     }
 }
