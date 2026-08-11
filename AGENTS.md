@@ -72,7 +72,16 @@ Do not create git branches manually — `maw ws create` handles branching for yo
 
 **All tools have `--help`** with usage examples. When unsure, run `<tool> --help` or `<tool> <command> --help`.
 
-### Directory Structure (maw v2)
+### Conflicts Are Data, Not Errors
+
+`maw ws sync` rebases committed-ahead workspaces onto the latest epoch by default. On conflict it does not abort — it commits labeled conflict markers and leaves the workspace `lifecycle:conflicted` (visible in `maw ws list`). Treat a conflicted workspace as a normal state, not a failure.
+
+- `maw ws resolve <ws> --list` shows conflicts; `--keep epoch|<ws>|both|union` (or `--keep PATH=NAME`) resolves them.
+- `maw ws merge` auto-syncs stale sources and accepts `--resolve cf-id=<ws>` / `--resolve-all=<ws>` to resolve inline.
+- `maw ws conflicts <ws>` inspects conflict details.
+- The one hard gate: merge refuses a source whose HEAD still has unresolved conflict markers (bypass with `--force` only for legitimate marker-like content).
+
+### Directory Structure
 
 This project uses a **bare repo** layout. Source files live in workspaces under `ws/`, not at the project root.
 
@@ -95,7 +104,6 @@ project-root/          ← bare repo (no source files here)
 - Use `maw exec default -- bn ...` for bones commands (always in default workspace)
 - Use `maw exec <ws> -- seal ...` for review commands (always in the review's workspace)
 - Never run `bn` or `seal` directly — always go through `maw exec`
-- Do not run `jj`; this workflow is Git + maw.
 
 ### Bones Quick Reference
 
@@ -135,7 +143,7 @@ Identity resolved from `$AGENT` env. No flags needed in agent loops.
 | Search recovery snapshots | `maw ws recover --search <pattern>` |
 | Show file from snapshot | `maw ws recover <name> --show <path>` |
 
-**Inspecting a workspace (use git, not jj):**
+**Inspecting a workspace:**
 ```bash
 maw exec <name> -- git status             # what changed (unstaged)
 maw exec <name> -- git log --oneline -5   # recent commits
@@ -203,14 +211,25 @@ rite claims release --agent $AGENT --all  # when done
 
 ### Reviews
 
-Use `@<project>-<role>` mentions to request reviews:
+Use `@<project>-<role>` mentions to request reviews. The @mention triggers the auto-spawn
+hook for the reviewer. Capture the request id and block on the verdict:
 
 ```bash
 maw exec $WS -- seal reviews request <review-id> --reviewers $PROJECT-security --agent $AGENT
-rite send --agent $AGENT $PROJECT "Review requested: <review-id> @$PROJECT-security" -L review-request
+req=$(rite send --agent $AGENT $PROJECT "Review requested: <review-id> @$PROJECT-security" -L review-request --format json | jq -r .id)
+maw exec default -- bn bone comment add <bone-id> "Review anchor: $req for <review-id>"
+rite wait --agent $AGENT --reply-to "$req" -t 300 --format json
 ```
 
-The @mention triggers the auto-spawn hook for the reviewer.
+- Exit 0: confirm the verdict with `maw exec $WS -- seal review <review-id>`, then finish
+  or fix in the same turn.
+- Exit 1: do NOT request the review again. Post one `-L task-blocked` message naming the
+  anchor and stop. The next turn reads review state from seal, not from a new request.
+- Exit 2: the anchor is wrong. Re-read it from history. Do NOT request the review again.
+
+**Reviewers**: post the verdict as a reply to the request that woke you
+(`--reply-to "$RITE_MESSAGE_ID"`, `-L review-done`). A top-level verdict leaves the author
+blocked until timeout.
 
 ### Bus Communication
 
@@ -219,28 +238,123 @@ Agents communicate via rite channels. You don't need to be expert on everything 
 | Operation | Command |
 |-----------|---------|
 | Send message | `rite send --agent $AGENT <channel> "message" [-L label]` |
+| Reply to a message | `rite send --agent $AGENT <channel> "message" --reply-to <msg-id>` |
+| Capture the id you sent | `rite send ... --format json \| jq -r .id` |
 | Check inbox | `rite inbox --agent $AGENT --channels <ch> [--mark-read]` |
-| Wait for reply | `rite wait -c <channel> --mention -t 120` |
+| Wait for an answer | `rite wait --agent $AGENT --reply-to <msg-id> -t 300 --format json` |
+| Wait for any mention | `rite wait --mentions --from <agent> -t 120` |
+| Read a thread | `rite history --thread <msg-id>` |
 | Browse history | `rite history <channel> -n 20` |
 | Search messages | `rite search "query" -c <channel>` |
 
-**Conversations**: After sending a question, use `rite wait -c <channel> --mention -t <seconds>` to block until the other agent replies. This enables back-and-forth conversations across channels.
-
 **Project experts**: Each `<project>-dev` is the expert on their project. When stuck on a companion tool (rite, maw, seal, vessel, bn), post a question to its project channel instead of guessing.
+
+#### Threads
+
+Every message you send answers something or starts something. Anchor the answers.
+
+- `--reply-to <id>` anchors a message under a parent. No `--reply-to` means top-level.
+- When a hook spawned you, the message that woke you is `$RITE_MESSAGE_ID`. Answer it:
+  `rite send --agent $AGENT "$RITE_CHANNEL" "on it" --reply-to "$RITE_MESSAGE_ID"`.
+  A lease batch instead sets `$RITE_BATCH_MESSAGE_IDS`, in chronological order. The
+  anchor is the LAST id in that list, not the first.
+- An anchor that is not in the store yet gives a warning, not an error. The reply links
+  up when the parent syncs in.
+- `rite history --thread <id>` reads the whole thread from any message in it, and finds
+  the channel itself. A thread reported `complete:false` is a fragment — say so, do not
+  present it as the whole conversation.
+- Your prompt carries the anchor for the current turn. Use that one. Never reuse the
+  anchor from an earlier turn.
+
+#### Ask and Wait
+
+Never post a question and hope. Anchor it, then block on the answer:
+
+```bash
+id=$(rite send --agent $AGENT <channel> "<question> @<target>" -L feedback --format json | jq -r .id)
+rite wait --agent $AGENT --reply-to "$id" -t 300 --format json
+```
+
+| Exit | Meaning | What to do |
+|------|---------|------------|
+| 0 | Answered | Read `.message.body` from the JSON and act on it |
+| 1 | Nobody answered in time | Escalate: post one `-L task-blocked` naming the anchor, record it on the bone, move on. **Never re-send the request.** |
+| 2 | Not a ULID, or this store never saw it | Fix the id (`rite history <channel> --from $AGENT -n 1 --format json` returns `last_id`). Do not re-send. Add `--allow-missing-parent` only when the parent is still syncing in from another machine. |
+
+`--reply-to` narrows the wait, it never widens it. `--from`, `-c` and `-L` only subtract
+candidate answers. With no `-c` every channel counts, so a reply in a DM satisfies the
+wait. A reply that arrived before the wait started still counts. Your own reply never
+satisfies your own wait.
 
 ### Cross-Project Communication
 
 **Don't suffer in silence.** If a tool confuses you or behaves unexpectedly, post to its project channel.
 
 1. Find the project: `rite history projects -n 50` (the #projects channel has project registry entries)
-2. Post question or feedback: `rite send --agent $AGENT <project> "..." -L feedback`
-3. For bugs, create bones in their repo first
-4. **Always create a local tracking bone** so you check back later:
+2. Ask and wait — capture the id, then block on the answer:
    ```bash
-   maw exec default -- bn create --title "[tracking] <summary>" --tag tracking --kind task
+   id=$(rite send --agent $AGENT <project> "<question> @<project>-dev" -L feedback --format json | jq -r .id)
+   rite wait --agent $AGENT --reply-to "$id" -t 300 --format json
+   ```
+3. For bugs, create bones in their repo first
+4. **On exit 1 (no answer), create a local tracking bone** and move on. Record the anchor
+   so the next check reads the thread instead of asking again:
+   ```bash
+   maw exec default -- bn create --title "[tracking] <summary>" --tag tracking --kind task \
+     --description "Asked #<project>: <question>. Anchor: <id>. Check: rite history --thread <id>"
    ```
 
 See [cross-channel.md](.agents/edict/cross-channel.md) for the full workflow.
+
+### Communication
+
+Use ASD-STE100 Simplified Technical English for prose. Strict compliance is not the goal. Aim for terse, unambiguous language.
+
+Do not apply STE to code, identifiers, commands, marketing copy, essays, or voice-driven writing.
+
+#### Language
+
+- Limit sentences to 20 words.
+- Replace semicolons and contractions.
+- Use active voice when the actor is known.
+- Use plain verbs. Avoid nominalization, phrasal verbs, and "-ing" main verbs.
+- Use one consistent name for each thing.
+
+#### rite messages
+
+Keep a channel message to one or two lines. Lead with the subject of the label. The label and the bone ID already carry the context, so do not add status blocks, numbered steps, or closing actions.
+
+- `[task-claim] Working on <bone-id>: <title>`
+- `[review-request] Review requested: <review-id> for <bone-id> @<reviewer>`
+- `[task-blocked] Blocked on <thing>: <what unblocks it>`
+
+Anchor an answer with `--reply-to` instead of quoting the message you answer. The anchor
+carries the context.
+
+#### Replies to a human
+
+1. Start with a concrete action. Put commands, paths, or snippets first.
+2. Number multistep tasks. Give each step one bounded action.
+3. Limit lists to five items. Split longer lists by priority.
+4. State the current step, what is complete, what remains, and what it waits on.
+5. End with the next action, or state what you wait on.
+
+Finish the current issue before you present another. State errors as evidence, cause, and fix.
+
+Do not use preambles, recaps, pleasantries, tangents, emotional error language, or empty hedges.
+
+Never state a time estimate you cannot support. You do not know how long a build, a test run, or another agent takes. Name what you wait on instead.
+
+#### Exceptions
+
+- Explain fully when the user asks for an explanation or a walkthrough.
+- Confirm before destructive actions.
+- After three failed fixes, state the uncertain assumption and ask one diagnostic question.
+- Ask one short question when real ambiguity makes a guess risky.
+
+Before you send, remove announcements, repeated summaries, sidebars, and empty closing questions.
+
+The first line must give the action. The last line must give the result or the next action.
 
 ### Session Search (optional)
 

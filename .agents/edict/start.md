@@ -14,9 +14,8 @@ Start a bone using the standard edict flow: claim the work, set up a workspace, 
 3. `rite claims stake --agent $AGENT "bone://$EDICT_PROJECT/<bone-id>" -m "<bone-id>"`
 4. Create a workspace named after the bone: `maw ws create <bone-id> --from main --description "<bone-title>"`. Store the bone-id as `$WS`. If the bone is tied to an existing change, add `--change <change-id>` instead of `--from main`.
 5. **All file edits must use the workspace path** `ws/$WS/` (e.g., `$PROJECT_ROOT/ws/bn-2kj9/`). Use absolute paths for Read, Write, and Edit tools. For commands: `maw exec $WS -- <command>`. Run `bn` commands via `maw exec default -- bn ...`.
-6. **No `jj`**: edict now uses Git worktrees through maw. Keep workspace actions in `maw` commands (and `git` only inside `maw exec` when needed).
-7. `rite claims stake --agent $AGENT "workspace://$EDICT_PROJECT/$WS" -m "<bone-id>"`
-8. Announce: `rite send --agent $AGENT $EDICT_PROJECT "Working on <bone-id>: <bone-title>" -L task-claim`
+6. `rite claims stake --agent $AGENT "workspace://$EDICT_PROJECT/$WS" -m "<bone-id>"`
+7. Announce: `rite send --agent $AGENT $EDICT_PROJECT "Working on <bone-id>: <bone-title>" -L task-claim`
 
 ## Assumptions
 

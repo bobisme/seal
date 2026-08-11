@@ -12,5 +12,6 @@ Validate toolchain and environment before multi-agent work.
 2. `rite whoami --agent $AGENT` — confirms identity, generates a name if not set.
 3. `rite status`
 4. `maw exec default -- bn show --help`
-5. `maw doctor`
-6. `maw exec default -- seal doctor`
+5. `maw doctor` — fast triage
+6. `maw fsck` — deep invariant check (exit 0 clean, 1 warn, 2 corruption; `--repair` applies only provably-safe fixes)
+7. `maw exec default -- seal doctor`

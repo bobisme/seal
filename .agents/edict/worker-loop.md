@@ -79,7 +79,6 @@ Before triaging new work, check if you have unfinished work from a previous sess
 - `rite claims stake --agent $AGENT "bone://$EDICT_PROJECT/<bone-id>" -m "<bone-id>"`
 - `maw ws create <bone-id> --from main --description "<bone-title>"` — use the bone ID as the workspace name. Store as `$WS`. Use `--change <change-id>` instead of `--from main` when continuing change-bound work.
 - **All file operations must use the workspace path** `ws/$WS/`. Use absolute paths for Read, Write, and Edit (e.g., `$PROJECT_ROOT/ws/$WS/src/file.rs`). For commands: `maw exec $WS -- <command>`.
-- **No `jj`**: this workflow is Git + maw. Keep workspace operations in `maw` and run `git` only via `maw exec $WS -- ...`.
 - `rite claims stake --agent $AGENT "workspace://$EDICT_PROJECT/$WS" -m "<bone-id>"`
 - `rite send --agent $AGENT $EDICT_PROJECT "Working on <bone-id>: <bone-title>" -L task-claim`
 
@@ -167,7 +166,7 @@ Then proceed with teardown:
 - `maw exec default -- bn bone comment add <bone-id> "Completed by $AGENT"`
 - `maw exec default -- bn done <bone-id> --reason "Completed"`
 - `maw ws merge $WS --into default --destroy --message "feat: <bone-title>"` (use a conventional commit prefix: `feat:`, `fix:`, `chore:`, etc.; swap `default` for a change id when the workspace is change-bound; if merge conflict, preserve workspace and announce)
-- `maw push` (if pushMain enabled in `.edict.toml`; maw v0.24.0+ handles bookmark and push)
+- `maw push` (if pushMain enabled in `.edict.toml`; pushes the configured branch. Use `maw push --advance` after direct commits.)
 - `rite claims release --agent $AGENT --all`
 - `rite send --agent $AGENT $EDICT_PROJECT "Completed <bone-id>: <bone-title>" -L task-done`
 
