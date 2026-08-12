@@ -4,11 +4,11 @@ version = "1.0.15"
 push_main = true
 
 [project]
-name = "botseal"
+name = "seal"
 type = ["cli"]
 languages = []
-default_agent = "botseal-dev"
-channel = "botseal"
+default_agent = "seal-dev"
+channel = "seal"
 release_instructions = """
 - Bump the version of all crates
 - Regenerate the Cargo.lock
