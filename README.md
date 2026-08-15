@@ -52,6 +52,7 @@ Every command needs an agent identity. Pass `--agent <name>`, or set `SEAL_AGENT
 
 ```bash
 seal reviews create --title "..."              # start a review
+seal reviews create --title "..." --base <rev> # set the start of the reviewed range
 seal comment <id> --file <path> --line N "..." # comment on a line
 seal reply <thread-id> "..."                   # reply in a thread
 seal lgtm <id> -m "..."                        # approve
@@ -63,6 +64,12 @@ seal doctor                                    # health check
 ```
 
 Add `--json` (or `--format json`) to any command for machine-parseable output.
+
+A review covers a commit range, not one commit. `seal reviews create` discovers where your
+branch or workspace forked and reviews every commit of the feature. It prints the range it
+chose. Use `--base <rev>` to state the range yourself, for example `--base HEAD~1` to review
+only the current commit. The base is persisted, so commits added later extend the review
+instead of pushing earlier work out of it.
 
 ## TUI for Humans
 

@@ -99,6 +99,7 @@ fn main() -> Result<()> {
                 title,
                 description,
                 reviewers,
+                base,
             } => {
                 let scm = resolve_backend(&workspace_root, scm_preference)?;
                 run_reviews_create(
@@ -108,6 +109,7 @@ fn main() -> Result<()> {
                     description,
                     reviewers,
                     identity.as_deref(),
+                    base.as_deref(),
                     format,
                 )?;
             }
@@ -150,8 +152,10 @@ fn main() -> Result<()> {
                 review_id,
                 reviewers,
             } => {
+                let scm = resolve_backend(&workspace_root, scm_preference)?;
                 run_reviews_request(
                     &seal_root,
+                    scm.as_ref(),
                     &review_id,
                     &reviewers,
                     identity.as_deref(),
@@ -159,7 +163,14 @@ fn main() -> Result<()> {
                 )?;
             }
             ReviewsCommands::Approve { review_id } => {
-                run_reviews_approve(&seal_root, &review_id, identity.as_deref(), format)?;
+                let scm = resolve_backend(&workspace_root, scm_preference)?;
+                run_reviews_approve(
+                    &seal_root,
+                    scm.as_ref(),
+                    &review_id,
+                    identity.as_deref(),
+                    format,
+                )?;
             }
             ReviewsCommands::Abandon { review_id, reason } => {
                 run_reviews_abandon(&seal_root, &review_id, reason, identity.as_deref(), format)?;
@@ -168,6 +179,7 @@ fn main() -> Result<()> {
                 review_id,
                 commit,
                 self_approve,
+                allow_stale_approval,
             } => {
                 let scm = resolve_backend(&workspace_root, scm_preference)?;
                 run_reviews_merge(
@@ -176,6 +188,7 @@ fn main() -> Result<()> {
                     &review_id,
                     commit,
                     self_approve,
+                    allow_stale_approval,
                     identity.as_deref(),
                     format,
                 )?;
@@ -329,11 +342,27 @@ fn main() -> Result<()> {
         }
 
         Commands::Lgtm { review_id, message } => {
-            run_lgtm(&seal_root, &review_id, message, identity.as_deref(), format)?;
+            let scm = resolve_backend(&workspace_root, scm_preference)?;
+            run_lgtm(
+                &seal_root,
+                scm.as_ref(),
+                &review_id,
+                message,
+                identity.as_deref(),
+                format,
+            )?;
         }
 
         Commands::Block { review_id, reason } => {
-            run_block(&seal_root, &review_id, reason, identity.as_deref(), format)?;
+            let scm = resolve_backend(&workspace_root, scm_preference)?;
+            run_block(
+                &seal_root,
+                scm.as_ref(),
+                &review_id,
+                reason,
+                identity.as_deref(),
+                format,
+            )?;
         }
 
         Commands::Review {

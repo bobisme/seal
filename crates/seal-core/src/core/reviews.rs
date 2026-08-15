@@ -67,6 +67,10 @@ impl<'a> ReviewService<'a> {
     /// Generates a new review ID, writes a `ReviewCreated` event, and optionally
     /// writes a `ReviewersRequested` event.
     ///
+    /// `base_commit` is the exclusive start of the reviewed range. It is
+    /// persisted on the event, so every later read covers the same commits
+    /// even after commits are added on top.
+    ///
     /// Returns the new review ID.
     pub fn create(
         &self,
@@ -75,6 +79,7 @@ impl<'a> ReviewService<'a> {
         description: Option<String>,
         reviewers: Option<Vec<String>>,
         author: Option<&str>,
+        base_commit: Option<String>,
     ) -> CoreResult<String> {
         let change_id = scm.current_anchor().map_err(CoreError::Internal)?;
         let commit_id = scm.current_commit().map_err(CoreError::Internal)?;
@@ -92,6 +97,7 @@ impl<'a> ReviewService<'a> {
                 scm_kind: Some(scm_kind),
                 scm_anchor: Some(change_id),
                 initial_commit: commit_id,
+                base_commit,
                 title,
                 description,
             }),
@@ -153,12 +159,16 @@ impl<'a> ReviewService<'a> {
     }
 
     /// Vote on a review (LGTM or block).
+    ///
+    /// `target_commit` records the code the vote applied to, so a later
+    /// commit can be recognised as unreviewed.
     pub fn vote(
         &self,
         review_id: &str,
         vote: VoteType,
         reason: Option<String>,
         author: Option<&str>,
+        target_commit: Option<String>,
     ) -> CoreResult<()> {
         let review = self.get(review_id)?;
         if review.status != "open" && review.status != "approved" {
@@ -177,6 +187,7 @@ impl<'a> ReviewService<'a> {
                 review_id: review_id.to_string(),
                 vote,
                 reason,
+                target_commit,
             }),
         );
 
@@ -188,13 +199,24 @@ impl<'a> ReviewService<'a> {
     }
 
     /// Approve a review.
-    pub fn approve(&self, review_id: &str, author: Option<&str>) -> CoreResult<()> {
+    ///
+    /// `target_commit` records the code the approval applied to. Without it,
+    /// nothing can prove the approval still covers what is being merged.
+    pub fn approve(
+        &self,
+        review_id: &str,
+        author: Option<&str>,
+        target_commit: Option<String>,
+    ) -> CoreResult<()> {
         let review = self.get(review_id)?;
-        if review.status != "open" {
+        // An already-approved review can be approved again to move the
+        // approval onto newer code. Without this a review whose approval
+        // went stale could never be approved again.
+        if review.status != "open" && review.status != "approved" {
             return Err(CoreError::InvalidReviewStatus {
                 review_id: review_id.to_string(),
                 actual: review.status,
-                expected: "open".to_string(),
+                expected: "open or approved".to_string(),
             });
         }
 
@@ -204,6 +226,7 @@ impl<'a> ReviewService<'a> {
             &author_str,
             Event::ReviewApproved(ReviewApproved {
                 review_id: review_id.to_string(),
+                target_commit,
             }),
         );
 

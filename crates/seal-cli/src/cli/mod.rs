@@ -284,6 +284,15 @@ pub enum ReviewsCommands {
         /// Comma-separated list of reviewers to request
         #[arg(long = "reviewers", visible_alias = "reviewer")]
         reviewers: Option<String>,
+
+        /// Base revision of the reviewed range (exclusive).
+        ///
+        /// The review then covers <base>..<current commit>. Without this,
+        /// seal discovers the fork point of the branch or workspace, so all
+        /// commits of the feature are reviewed. Pass HEAD~1 to review only
+        /// the current commit.
+        #[arg(long = "base")]
+        base: Option<String>,
     },
 
     /// List reviews
@@ -350,6 +359,13 @@ pub enum ReviewsCommands {
         /// Auto-approve before merging (for solo/self-review workflows)
         #[arg(long)]
         self_approve: bool,
+
+        /// Merge even when the approval predates the code being merged.
+        ///
+        /// By default seal refuses, because commits added after the approval
+        /// were never reviewed.
+        #[arg(long = "allow-stale-approval")]
+        allow_stale_approval: bool,
     },
 }
 

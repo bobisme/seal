@@ -447,6 +447,7 @@ mod tests {
                 scm_kind: Some("git".to_string()),
                 scm_anchor: Some("anchor".to_string()),
                 initial_commit: "commit".to_string(),
+                base_commit: None,
                 title: "Review".to_string(),
                 description: None,
             }),

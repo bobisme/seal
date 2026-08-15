@@ -375,6 +375,65 @@ impl JjRepo {
             .map(ToString::to_string)
             .collect())
     }
+
+    /// Count the commits in the revset `base..target`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the jj command fails.
+    pub fn count_commits_between(&self, base: &str, target: &str) -> Result<usize> {
+        let revset = format!("{base}..{target}");
+        let output = self
+            .run_jj(&["log", "-r", &revset, "--no-graph", "-T", r#""x\n""#])
+            .with_context(|| format!("Failed to count commits in {revset}"))?;
+
+        Ok(output.lines().filter(|line| !line.is_empty()).count())
+    }
+
+    /// Report whether `ancestor` is an ancestor of `descendant`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the jj command fails.
+    pub fn is_ancestor(&self, ancestor: &str, descendant: &str) -> Result<bool> {
+        let revset = format!("{ancestor} & ::{descendant}");
+        let output = self
+            .run_jj(&["log", "-r", &revset, "--no-graph", "-T", "commit_id"])
+            .with_context(|| format!("Failed to test whether {ancestor} precedes {descendant}"))?;
+
+        Ok(!output.trim().is_empty())
+    }
+
+    /// Find the newest immutable ancestor of `target`.
+    ///
+    /// This is where the mutable feature work forked from published history,
+    /// so it is the base of the range under review.
+    ///
+    /// The root commit is excluded on purpose. A repository with no remote
+    /// has no trunk, so `immutable()` holds only the root, and accepting it
+    /// would widen every review to the whole history. `None` then tells the
+    /// caller to keep the single-commit fallback, and the author passes
+    /// `--base` to state the range.
+    ///
+    /// Also returns `None` when this jj version rejects the revset.
+    ///
+    /// # Errors
+    ///
+    /// Never returns an error. The signature matches the SCM trait, where
+    /// other backends can fail.
+    pub fn find_immutable_base(&self, target: &str) -> Result<Option<String>> {
+        let revset = format!("heads(::{target} & (immutable() ~ root()))");
+        let Ok(output) = self.run_jj(&["log", "-r", &revset, "--no-graph", "-T", "commit_id"])
+        else {
+            // Older jj versions have no immutable() revset function.
+            return Ok(None);
+        };
+
+        Ok(output
+            .lines()
+            .find(|line| !line.trim().is_empty())
+            .map(|line| line.trim().to_string()))
+    }
 }
 
 #[cfg(test)]
@@ -391,6 +450,167 @@ mod tests {
             return None;
         }
         Some(JjRepo::new(manifest_path))
+    }
+
+    /// Build a jj repo holding a three-change feature whose FIRST change
+    /// carries the substantive work. Mirrors the bn-t1rl repro.
+    ///
+    /// Returns `None` when jj is not installed, so the suite still runs.
+    fn setup_three_change_feature() -> Option<(JjRepo, PathBuf)> {
+        if which::which("jj").is_err() {
+            return None;
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().to_path_buf();
+
+        let run = |args: &[&str]| {
+            let status = Command::new("jj")
+                .current_dir(&path)
+                .arg("--color=never")
+                .args(args)
+                .status()
+                .expect("failed to run jj");
+            assert!(status.success(), "jj command failed: {args:?}");
+        };
+
+        run(&["git", "init"]);
+        run(&["config", "set", "--repo", "user.name", "Test User"]);
+        run(&["config", "set", "--repo", "user.email", "test@example.com"]);
+
+        // Change 1: the substantive work.
+        std::fs::write(path.join("feature.rs"), "fn hook() {}\n").expect("write");
+        run(&["describe", "-m", "feat: add hook"]);
+        run(&["new"]);
+
+        // Changes 2 and 3: conflict resolution and integration.
+        std::fs::write(path.join("resolved.txt"), "resolved\n").expect("write");
+        run(&["describe", "-m", "fix: resolve conflict"]);
+        run(&["new"]);
+
+        std::fs::write(path.join("integration.txt"), "integrated\n").expect("write");
+        run(&["describe", "-m", "chore: integrate"]);
+
+        std::mem::forget(dir);
+        Some((JjRepo::new(&path), path))
+    }
+
+    #[test]
+    fn test_jj_explicit_base_covers_the_whole_feature() {
+        let Some((repo, _path)) = setup_three_change_feature() else {
+            return;
+        };
+
+        let target = repo.get_current_commit().expect("target");
+        // The base is the commit the feature forked from: the parent of the
+        // first change. This is what `--base` persists on the review.
+        let base = repo
+            .get_commit_for_rev("roots(mutable())-")
+            .expect("fork point");
+
+        assert_eq!(
+            repo.count_commits_between(&base, &target).expect("count"),
+            3
+        );
+
+        let files = repo.changed_files_between(&base, &target).expect("files");
+        assert!(
+            files.contains(&"feature.rs".to_string()),
+            "first change missing from range: {files:?}"
+        );
+        assert!(files.contains(&"resolved.txt".to_string()));
+        assert!(files.contains(&"integration.txt".to_string()));
+    }
+
+    #[test]
+    fn test_jj_tip_only_range_drops_the_first_change() {
+        // Documents the old behaviour this change fixes.
+        let Some((repo, _path)) = setup_three_change_feature() else {
+            return;
+        };
+
+        let target = repo.get_current_commit().expect("target");
+        let tip_parent = repo.get_parent_commit(&target).expect("parent");
+
+        let files = repo
+            .changed_files_between(&tip_parent, &target)
+            .expect("files");
+
+        assert_eq!(files, vec!["integration.txt".to_string()]);
+    }
+
+    #[test]
+    fn test_jj_explicit_base_survives_a_change_added_after_creation() {
+        let Some((repo, path)) = setup_three_change_feature() else {
+            return;
+        };
+
+        let base = repo
+            .get_commit_for_rev("roots(mutable())-")
+            .expect("fork point");
+
+        // A later change on the same stack must not push earlier work out.
+        let status = Command::new("jj")
+            .current_dir(&path)
+            .args(["--color=never", "new"])
+            .status()
+            .expect("jj new");
+        assert!(status.success());
+        std::fs::write(path.join("later.txt"), "later\n").expect("write");
+
+        let new_target = repo.get_current_commit().expect("target");
+        let files = repo
+            .changed_files_between(&base, &new_target)
+            .expect("files");
+
+        assert!(files.contains(&"feature.rs".to_string()));
+        assert!(files.contains(&"later.txt".to_string()));
+        assert_eq!(
+            repo.count_commits_between(&base, &new_target)
+                .expect("count"),
+            4
+        );
+    }
+
+    #[test]
+    fn test_jj_is_ancestor_tracks_changes_added_after_approval() {
+        let Some((repo, path)) = setup_three_change_feature() else {
+            return;
+        };
+
+        // Stand in for the commit an approval was recorded against.
+        let approved = repo.get_current_commit().expect("approved");
+
+        let status = Command::new("jj")
+            .current_dir(&path)
+            .args(["--color=never", "new"])
+            .status()
+            .expect("jj new");
+        assert!(status.success());
+        std::fs::write(path.join("later.txt"), "later\n").expect("write");
+
+        let new_target = repo.get_current_commit().expect("target");
+
+        assert!(repo.is_ancestor(&approved, &new_target).expect("ancestor"));
+        assert!(!repo.is_ancestor(&new_target, &approved).expect("ancestor"));
+        assert_eq!(
+            repo.count_commits_between(&approved, &new_target)
+                .expect("count"),
+            1
+        );
+    }
+
+    #[test]
+    fn test_jj_discovery_declines_the_root_commit() {
+        // With no trunk, immutable() holds only root(). Widening a review to
+        // the whole history would be wrong, so discovery returns None and the
+        // caller keeps the single-commit fallback.
+        let Some((repo, _path)) = setup_three_change_feature() else {
+            return;
+        };
+
+        let target = repo.get_current_commit().expect("target");
+        assert_eq!(repo.find_immutable_base(&target).expect("discover"), None);
     }
 
     #[test]

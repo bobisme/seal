@@ -67,6 +67,12 @@ pub struct ReviewCreated {
     pub scm_anchor: Option<String>,
     /// Commit hash at review creation
     pub initial_commit: String,
+    /// Base commit of the review range (`base_commit..target`).
+    ///
+    /// Absent on reviews created before ranges were supported. Readers then
+    /// fall back to the parent of the target commit, which covers one commit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_commit: Option<String>,
     /// Review title
     pub title: String,
     /// Optional description
@@ -106,11 +112,23 @@ pub struct ReviewerVoted {
     /// Optional reason (typically used for blocks)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// Target commit the vote applied to.
+    ///
+    /// Absent on votes cast before this was recorded. Readers then cannot
+    /// tell whether the vote still covers the current code.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_commit: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReviewApproved {
     pub review_id: String,
+    /// Target commit the approval applied to.
+    ///
+    /// Absent on approvals recorded before this was tracked. An approval
+    /// that names no commit cannot be checked against later commits.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_commit: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -252,6 +270,7 @@ mod tests {
                 scm_kind: Some("jj".to_string()),
                 scm_anchor: Some("abc123".to_string()),
                 initial_commit: "def456".to_string(),
+                base_commit: None,
                 title: "Test Review".to_string(),
                 description: Some("A test".to_string()),
             }),

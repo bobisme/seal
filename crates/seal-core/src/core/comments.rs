@@ -228,6 +228,7 @@ mod tests {
                 scm_kind: Some("git".to_string()),
                 scm_anchor: Some("refs/heads/main".to_string()),
                 initial_commit: "abc123".to_string(),
+                base_commit: None,
                 title: "Review".to_string(),
                 description: None,
             }),

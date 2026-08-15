@@ -314,6 +314,54 @@ impl ProjectionDb {
                 .context("Failed to add scm_anchor column to reviews")?;
         }
 
+        let has_base_commit: bool = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('reviews') WHERE name = 'base_commit'",
+                [],
+                |row| row.get(0),
+            )
+            .context("Failed to check for base_commit column")?;
+
+        if !has_base_commit {
+            self.conn
+                .execute("ALTER TABLE reviews ADD COLUMN base_commit TEXT", [])
+                .context("Failed to add base_commit column to reviews")?;
+        }
+
+        let has_approved_commit: bool = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('reviews') WHERE name = 'approved_commit'",
+                [],
+                |row| row.get(0),
+            )
+            .context("Failed to check for approved_commit column")?;
+
+        if !has_approved_commit {
+            self.conn
+                .execute("ALTER TABLE reviews ADD COLUMN approved_commit TEXT", [])
+                .context("Failed to add approved_commit column to reviews")?;
+        }
+
+        let has_voted_commit: bool = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('reviewer_votes') WHERE name = 'voted_commit'",
+                [],
+                |row| row.get(0),
+            )
+            .context("Failed to check for voted_commit column")?;
+
+        if !has_voted_commit {
+            self.conn
+                .execute(
+                    "ALTER TABLE reviewer_votes ADD COLUMN voted_commit TEXT",
+                    [],
+                )
+                .context("Failed to add voted_commit column to reviewer_votes")?;
+        }
+
         self.conn
             .execute(
                 "UPDATE reviews SET scm_anchor = jj_change_id WHERE scm_anchor IS NULL OR scm_anchor = ''",
@@ -1471,15 +1519,16 @@ fn apply_review_created(
 ) -> Result<()> {
     conn.execute(
         "INSERT OR IGNORE INTO reviews (
-            review_id, jj_change_id, scm_kind, scm_anchor, initial_commit, title, description,
-            author, created_at, status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open')",
+            review_id, jj_change_id, scm_kind, scm_anchor, initial_commit, base_commit,
+            title, description, author, created_at, status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open')",
         params![
             event.review_id,
             event.jj_change_id,
             event.scm_kind.as_deref().unwrap_or("jj"),
             event.scm_anchor.as_deref().unwrap_or(&event.jj_change_id),
             event.initial_commit,
+            event.base_commit,
             event.title,
             event.description,
             author,
@@ -1518,18 +1567,20 @@ fn apply_reviewer_voted(
 ) -> Result<()> {
     // Insert or replace vote (a reviewer can change their vote)
     conn.execute(
-        "INSERT INTO reviewer_votes (review_id, reviewer, vote, reason, voted_at)
-         VALUES (?, ?, ?, ?, ?)
+        "INSERT INTO reviewer_votes (review_id, reviewer, vote, reason, voted_at, voted_commit)
+         VALUES (?, ?, ?, ?, ?, ?)
          ON CONFLICT (review_id, reviewer) DO UPDATE SET
              vote = excluded.vote,
              reason = excluded.reason,
-             voted_at = excluded.voted_at",
+             voted_at = excluded.voted_at,
+             voted_commit = excluded.voted_commit",
         params![
             event.review_id,
             author,
             event.vote.to_string(),
             event.reason,
             ts.to_rfc3339(),
+            event.target_commit,
         ],
     )?;
     Ok(())
@@ -1545,9 +1596,15 @@ fn apply_review_approved(
         "UPDATE reviews SET
             status = 'approved',
             status_changed_at = ?,
-            status_changed_by = ?
-        WHERE review_id = ? AND status = 'open'",
-        params![ts.to_rfc3339(), author, event.review_id],
+            status_changed_by = ?,
+            approved_commit = ?
+        WHERE review_id = ? AND status IN ('open', 'approved')",
+        params![
+            ts.to_rfc3339(),
+            author,
+            event.target_commit,
+            event.review_id
+        ],
     )?;
     Ok(())
 }
@@ -1733,6 +1790,8 @@ CREATE TABLE IF NOT EXISTS reviews (
     scm_kind TEXT NOT NULL DEFAULT 'jj' CHECK (scm_kind IN ('jj', 'git')),
     scm_anchor TEXT,
     initial_commit TEXT NOT NULL,
+    base_commit TEXT,
+    approved_commit TEXT,
     final_commit TEXT,
     title TEXT NOT NULL,
     description TEXT,
@@ -1767,6 +1826,7 @@ CREATE TABLE IF NOT EXISTS reviewer_votes (
     vote TEXT NOT NULL CHECK (vote IN ('lgtm', 'block')),
     reason TEXT,
     voted_at TEXT NOT NULL,
+    voted_commit TEXT,
     PRIMARY KEY (review_id, reviewer)
 );
 
@@ -1912,6 +1972,7 @@ mod tests {
                 scm_kind: Some("jj".to_string()),
                 scm_anchor: Some("change123".to_string()),
                 initial_commit: "commit456".to_string(),
+                base_commit: None,
                 title: format!("Review {review_id}"),
                 description: Some("Test description".to_string()),
             }),
@@ -2044,6 +2105,7 @@ mod tests {
                 "alice",
                 Event::ReviewApproved(ReviewApproved {
                     review_id: "cr-001".to_string(),
+                    target_commit: None,
                 }),
             ),
         )
@@ -2058,6 +2120,31 @@ mod tests {
             )
             .unwrap();
         assert_eq!(status, "approved");
+
+        // Re-approving an already-approved review moves the approval onto the
+        // newer commit. Without this a stale approval could never be refreshed
+        // and the review could never merge.
+        apply_event(
+            &db,
+            &EventEnvelope::new(
+                "alice",
+                Event::ReviewApproved(ReviewApproved {
+                    review_id: "cr-001".to_string(),
+                    target_commit: Some("commit-after-hardening".to_string()),
+                }),
+            ),
+        )
+        .unwrap();
+
+        let approved_commit: Option<String> = db
+            .conn()
+            .query_row(
+                "SELECT approved_commit FROM reviews WHERE review_id = ?",
+                params!["cr-001"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(approved_commit.as_deref(), Some("commit-after-hardening"));
 
         // Merge review
         apply_event(
@@ -2437,6 +2524,7 @@ mod tests {
                 review_id: review_id.to_string(),
                 vote: VoteType::Block,
                 reason: Some(reason.to_string()),
+                target_commit: None,
             }),
         )
     }
@@ -2449,6 +2537,7 @@ mod tests {
                 review_id: review_id.to_string(),
                 vote: VoteType::Lgtm,
                 reason: Some("Looks good".to_string()),
+                target_commit: None,
             }),
         )
     }
@@ -3245,6 +3334,7 @@ mod tests {
                     review_id: "cr-001".to_string(),
                     vote: VoteType::Block,
                     reason: Some("Needs fixes".to_string()),
+                    target_commit: None,
                 }),
             ),
         )
@@ -3271,6 +3361,7 @@ mod tests {
                     review_id: "cr-001".to_string(),
                     vote: VoteType::Lgtm,
                     reason: Some("Looks good now".to_string()),
+                    target_commit: None,
                 }),
             ),
         )

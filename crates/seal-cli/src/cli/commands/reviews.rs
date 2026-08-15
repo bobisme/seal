@@ -8,8 +8,53 @@ use crate::cli::commands::helpers::{ensure_initialized, open_services};
 use crate::output::{Formatter, OutputFormat};
 use seal_core::events::VoteType;
 use seal_core::projection::{ReviewDetail, ThreadSummary};
-use seal_core::scm::{git_diff_section_path, ScmRepo};
+use seal_core::range::{
+    approval_coverage, resolve_new_review_base, resolve_review_range, resolve_target_commit,
+    ApprovalCoverage, StaleReason,
+};
+use seal_core::scm::{git_diff_section_path, ScmKind, ScmRepo};
 use seal_core::sealignore::{AllFilesIgnoredError, SealIgnore};
+
+/// Shorten a commit hash for display. Non-hash revisions pass through.
+fn short_commit(commit: &str) -> &str {
+    if commit.len() > 12 && commit.chars().all(|c| c.is_ascii_hexdigit()) {
+        &commit[..12]
+    } else {
+        commit
+    }
+}
+
+/// Build the message shown when an approval no longer covers the code.
+fn stale_approval_message(
+    review_id: &str,
+    coverage: &ApprovalCoverage,
+    reason: &StaleReason,
+) -> String {
+    let detail = match reason {
+        StaleReason::NoApprovedCommit => {
+            "The approval records no commit, so it cannot be checked against the current code."
+                .to_string()
+        }
+        StaleReason::CommitsAdded => {
+            let approved = coverage.approved_commit.as_deref().unwrap_or("unknown");
+            let count = match coverage.uncovered_commits {
+                Some(1) => " (1 commit)".to_string(),
+                Some(n) => format!(" ({n} commits)"),
+                None => String::new(),
+            };
+            format!(
+                "Approved at:  {}\n  Target now:   {}{}",
+                short_commit(approved),
+                short_commit(&coverage.current_target),
+                count
+            )
+        }
+    };
+
+    format!(
+        "Cannot merge {review_id}: the approval does not cover the current code.\n  {detail}\n\n  To fix: ask a reviewer to vote again with 'seal lgtm {review_id}',\n  or merge anyway with --allow-stale-approval."
+    )
+}
 
 /// Parse a --since value into a `DateTime`.
 /// Supports:
@@ -66,6 +111,7 @@ pub fn run_reviews_create(
     description: Option<String>,
     reviewers: Option<String>,
     author: Option<&str>,
+    base: Option<&str>,
     format: OutputFormat,
 ) -> Result<()> {
     ensure_initialized(seal_root)?;
@@ -77,9 +123,16 @@ pub fn run_reviews_create(
         .current_commit()
         .context("Failed to get current commit")?;
 
+    // Resolve the base of the reviewed range. An explicit --base wins;
+    // otherwise seal discovers where this branch or workspace forked, so a
+    // feature with several commits is reviewed whole instead of tip-only.
+    let base_commit = resolve_new_review_base(scm, &commit_id, base)?;
+    let commit_count = scm
+        .count_commits_between(&base_commit, &commit_id)
+        .unwrap_or(None);
+
     // Check if there are any non-ignored files to review
-    let parent_commit = scm.parent_commit(&commit_id)?;
-    let all_files = scm.changed_files_between(&parent_commit, &commit_id)?;
+    let all_files = scm.changed_files_between(&base_commit, &commit_id)?;
     let sealignore = SealIgnore::load(seal_root);
     let (reviewable_files, ignored_count) = sealignore.filter_files(all_files);
 
@@ -93,7 +146,9 @@ pub fn run_reviews_create(
             .into());
         }
         // No files changed at all
-        bail!("No files changed in this commit. Nothing to review.");
+        bail!(
+            "No files changed in {base_commit}..{commit_id}. Nothing to review.\n  To fix: commit your work, or pass --base <rev> to widen the range."
+        );
     }
 
     // Parse reviewers before creating the review
@@ -112,6 +167,7 @@ pub fn run_reviews_create(
         description,
         reviewer_list.clone(),
         author,
+        Some(base_commit.clone()),
     )?;
 
     // Resolve author for output (same logic the service uses internally)
@@ -125,6 +181,9 @@ pub fn run_reviews_create(
         "scm_kind": scm.kind().as_str(),
         "scm_anchor": scm_anchor,
         "initial_commit": commit_id,
+        "base_commit": base_commit,
+        "target_commit": commit_id,
+        "commit_count": commit_count,
         "title": title,
         "author": author_str,
     });
@@ -137,6 +196,24 @@ pub fn run_reviews_create(
 
     // Add next steps for non-JSON formats (agents need guidance on what to do next)
     if format != OutputFormat::Json {
+        println!();
+        println!(
+            "Range: {}..{}{}",
+            short_commit(&base_commit),
+            short_commit(&commit_id),
+            match commit_count {
+                Some(1) => " (1 commit)".to_string(),
+                Some(n) => format!(" ({n} commits)"),
+                None => String::new(),
+            }
+        );
+        if commit_count.is_some_and(|n| n > 1) {
+            let tip_parent = match scm.kind() {
+                ScmKind::Jj => format!("{commit_id}-"),
+                ScmKind::Git => format!("{commit_id}~1"),
+            };
+            println!("  To review only the last commit: --base {tip_parent}");
+        }
         println!();
         println!("Next:");
         if reviewer_list.is_none() {
@@ -203,9 +280,10 @@ pub fn run_reviews_show(repo_root: &Path, review_id: &str, format: OutputFormat)
 }
 
 /// Request reviewers for a review.
-#[tracing::instrument(skip(repo_root, format))]
+#[tracing::instrument(skip(repo_root, scm, format))]
 pub fn run_reviews_request(
     repo_root: &Path,
+    scm: &dyn ScmRepo,
     review_id: &str,
     reviewers: &str,
     author: Option<&str>,
@@ -224,17 +302,42 @@ pub fn run_reviews_request(
     }
 
     let services = open_services(repo_root)?;
+
+    // A re-request usually follows new commits. Say plainly that the standing
+    // approval no longer covers them, so nobody merges on a stale vote.
+    let review = services.reviews().get(review_id)?;
+    let coverage = approval_coverage(scm, &review);
+
     services
         .reviews()
         .request_reviewers(review_id, reviewer_list.clone(), author)?;
 
-    let result = serde_json::json!({
+    let mut result = serde_json::json!({
         "review_id": review_id,
         "reviewers": reviewer_list,
     });
+    if let Some(coverage) = &coverage {
+        result["approval_stale"] = serde_json::json!(coverage.is_stale());
+        result["approved_commit"] = serde_json::json!(coverage.approved_commit);
+        result["target_commit"] = serde_json::json!(coverage.current_target);
+        result["uncovered_commits"] = serde_json::json!(coverage.uncovered_commits);
+    }
 
     let formatter = Formatter::new(format);
     formatter.print(&result)?;
+
+    if format != OutputFormat::Json {
+        if let Some(coverage) = &coverage {
+            if coverage.is_stale() {
+                println!();
+                println!(
+                    "Warning: this review is still marked approved, but the approval does not"
+                );
+                println!("cover the current code. seal will refuse to mark it merged until a");
+                println!("reviewer votes again.");
+            }
+        }
+    }
 
     Ok(())
 }
@@ -242,6 +345,7 @@ pub fn run_reviews_request(
 /// Approve a review.
 pub fn run_reviews_approve(
     repo_root: &Path,
+    scm: &dyn ScmRepo,
     review_id: &str,
     author: Option<&str>,
     format: OutputFormat,
@@ -260,11 +364,16 @@ pub fn run_reviews_approve(
         );
     }
 
-    services.reviews().approve(review_id, author)?;
+    // Record what is being approved, so a later commit reads as unreviewed.
+    let approved_commit = resolve_target_commit(scm, &review);
+    services
+        .reviews()
+        .approve(review_id, author, Some(approved_commit.clone()))?;
 
     let result = serde_json::json!({
         "review_id": review_id,
         "status": "approved",
+        "approved_commit": approved_commit,
     });
 
     let formatter = Formatter::new(format);
@@ -316,12 +425,14 @@ pub fn run_reviews_abandon(
 /// * `seal_root` - Path to main repo (where .seal/ lives)
 /// * `workspace_root` - Path to current workspace (for jj @ resolution)
 /// * `self_approve` - If true, auto-approve open reviews before merging
+/// * `allow_stale` - If true, merge even when the approval predates the code
 pub fn run_reviews_merge(
     seal_root: &Path,
     scm: &dyn ScmRepo,
     review_id: &str,
     commit: Option<String>,
     self_approve: bool,
+    allow_stale: bool,
     author: Option<&str>,
     format: OutputFormat,
 ) -> Result<()> {
@@ -343,12 +454,42 @@ pub fn run_reviews_merge(
         );
     }
     if review.status == "open" && self_approve {
-        // Auto-approve the review first
-        services.reviews().approve(review_id, author)?;
+        // Auto-approve the review first, against the commit being merged.
+        let approved_commit = resolve_target_commit(scm, &review);
+        services
+            .reviews()
+            .approve(review_id, author, Some(approved_commit))?;
     }
 
     // Re-open the database to get fresh state after any approval
     let services = open_services(seal_root)?;
+
+    // Refuse to merge code the approval does not cover. Without this an author
+    // can approve, commit more, and merge the new work unreviewed.
+    //
+    // Only proven uncovered commits block the merge. A review approved before
+    // seal recorded approved commits carries no evidence either way, so it
+    // warns instead: blocking every in-flight review on upgrade would punish
+    // teams for a gap they did not create.
+    let review = services.reviews().get(review_id)?;
+    let coverage = approval_coverage(scm, &review);
+    if let Some(coverage) = &coverage {
+        match coverage.stale_reason.as_ref() {
+            Some(StaleReason::CommitsAdded) if !allow_stale => {
+                bail!(
+                    "{}",
+                    stale_approval_message(review_id, coverage, &StaleReason::CommitsAdded)
+                );
+            }
+            Some(StaleReason::NoApprovedCommit) => {
+                eprintln!(
+                    "Warning: {review_id} was approved before seal recorded approved commits."
+                );
+                eprintln!("  Nothing proves the approval covers the code being merged.");
+            }
+            _ => {}
+        }
+    }
 
     // Check for blocking votes (not yet in service layer, use db directly)
     if services.db().has_blocking_votes(review_id)? {
@@ -397,9 +538,10 @@ pub fn run_reviews_merge(
 }
 
 /// Vote LGTM on a review.
-#[tracing::instrument(skip(repo_root, format, message))]
+#[tracing::instrument(skip(repo_root, scm, format, message))]
 pub fn run_lgtm(
     repo_root: &Path,
+    scm: &dyn ScmRepo,
     review_id: &str,
     message: Option<String>,
     author: Option<&str>,
@@ -407,6 +549,7 @@ pub fn run_lgtm(
 ) -> Result<()> {
     run_vote(
         repo_root,
+        scm,
         review_id,
         VoteType::Lgtm,
         message,
@@ -416,9 +559,10 @@ pub fn run_lgtm(
 }
 
 /// Block a review (request changes).
-#[tracing::instrument(skip(repo_root, format, reason))]
+#[tracing::instrument(skip(repo_root, scm, format, reason))]
 pub fn run_block(
     repo_root: &Path,
+    scm: &dyn ScmRepo,
     review_id: &str,
     reason: String,
     author: Option<&str>,
@@ -426,6 +570,7 @@ pub fn run_block(
 ) -> Result<()> {
     run_vote(
         repo_root,
+        scm,
         review_id,
         VoteType::Block,
         Some(reason),
@@ -437,6 +582,7 @@ pub fn run_block(
 /// Internal vote handler.
 fn run_vote(
     repo_root: &Path,
+    scm: &dyn ScmRepo,
     review_id: &str,
     vote: VoteType,
     reason: Option<String>,
@@ -456,38 +602,53 @@ fn run_vote(
     if review.status == "abandoned" {
         bail!("Cannot vote on abandoned review: {review_id}");
     }
-    let review_status = review.status;
+    let review_status = review.status.clone();
 
     // Resolve author identity for output and auto-approve check
     let author_str = seal_core::events::get_agent_identity(author)?;
 
-    services
-        .reviews()
-        .vote(review_id, vote, reason.clone(), author)?;
+    // Record the code this vote applied to.
+    let voted_commit = resolve_target_commit(scm, &review);
 
-    // Auto-approve on LGTM if review is open and no blocking votes from others
-    let auto_approved = if vote == VoteType::Lgtm && review_status == "open" {
-        // Re-sync to see our newly recorded vote
-        let services = open_services(repo_root)?;
-        let has_blocks = services
-            .db()
-            .has_blocking_votes_from_others(review_id, &author_str)?;
-        if has_blocks {
-            false
+    services.reviews().vote(
+        review_id,
+        vote,
+        reason.clone(),
+        author,
+        Some(voted_commit.clone()),
+    )?;
+
+    // Auto-approve on LGTM when the review is open, and re-approve when it is
+    // already approved against older code. Without the second case a stale
+    // approval could never be refreshed and the review could never merge.
+    let refreshes_stale_approval = review_status == "approved"
+        && approval_coverage(scm, &review).is_some_and(|c| c.is_stale());
+    let auto_approved =
+        if vote == VoteType::Lgtm && (review_status == "open" || refreshes_stale_approval) {
+            // Re-sync to see our newly recorded vote
+            let services = open_services(repo_root)?;
+            let has_blocks = services
+                .db()
+                .has_blocking_votes_from_others(review_id, &author_str)?;
+            if has_blocks {
+                false
+            } else {
+                // Auto-approve the review against the commit just voted on.
+                services
+                    .reviews()
+                    .approve(review_id, author, Some(voted_commit.clone()))?;
+                true
+            }
         } else {
-            // Auto-approve the review
-            services.reviews().approve(review_id, author)?;
-            true
-        }
-    } else {
-        false
-    };
+            false
+        };
 
     let mut result = serde_json::json!({
         "review_id": review_id,
         "vote": vote.to_string(),
         "reason": reason,
         "voter": author_str,
+        "voted_commit": voted_commit,
     });
     if auto_approved {
         result["auto_approved"] = serde_json::json!(true);
@@ -528,12 +689,7 @@ pub fn run_review(
         let mut threads_with_comments = Vec::new();
 
         // Determine commit for context (same logic as text/pretty output)
-        let commit_ref = review
-            .final_commit
-            .clone()
-            .or_else(|| scm.commit_for_anchor(&review.scm_anchor).ok())
-            .or_else(|| scm.commit_for_anchor(&review.jj_change_id).ok())
-            .unwrap_or_else(|| review.initial_commit.clone());
+        let commit_ref = resolve_target_commit(scm, &review);
 
         // Pre-fetch file contents for all thread files (one show_file per unique file)
         let mut file_cache: std::collections::HashMap<String, String> =
@@ -651,12 +807,7 @@ pub fn run_review(
     let threads = services.threads().list(review_id, None, None)?;
 
     // Determine commit for context/diff rendering
-    let commit_ref = review
-        .final_commit
-        .clone()
-        .or_else(|| scm.commit_for_anchor(&review.scm_anchor).ok())
-        .or_else(|| scm.commit_for_anchor(&review.jj_change_id).ok())
-        .unwrap_or_else(|| review.initial_commit.clone());
+    let commit_ref = resolve_target_commit(scm, &review);
 
     // Pre-fetch file contents for thread files when include_diffs is requested.
     let mut file_cache: std::collections::HashMap<String, String> =
@@ -1016,10 +1167,9 @@ fn build_file_diffs(
     let files_with_threads: std::collections::BTreeSet<String> =
         threads.iter().map(|t| t.file_path.clone()).collect();
 
-    // Resolve base commit
-    let base_commit = scm
-        .parent_commit(target_commit)
-        .unwrap_or_else(|_| review.initial_commit.clone());
+    // Resolve the base of the reviewed range. The review's persisted base
+    // keeps every commit of a multi-commit feature in the diff.
+    let base_commit = resolve_review_range(scm, review).base;
 
     // Single diff call — split into per-file diffs in Rust
     let full_diff = scm

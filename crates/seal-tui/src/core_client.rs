@@ -251,11 +251,11 @@ impl CoreClient {
             return Vec::new();
         };
 
-        let target_commit = resolve_review_target_commit(scm.as_ref(), review);
-
-        let base_commit = scm
-            .parent_commit(&target_commit)
-            .unwrap_or_else(|_| review.initial_commit.clone());
+        // The review's persisted base keeps every commit of a multi-commit
+        // feature in the diff, not only the tip commit.
+        let range = seal_core::range::resolve_review_range(scm.as_ref(), review);
+        let target_commit = range.target;
+        let base_commit = range.base;
 
         // Get full diff and split by file
         let full_diff = scm
@@ -365,12 +365,7 @@ fn resolve_review_target_commit(
     scm: &dyn ScmRepo,
     review: &seal_core::projection::ReviewDetail,
 ) -> String {
-    review
-        .final_commit
-        .clone()
-        .or_else(|| scm.commit_for_anchor(&review.scm_anchor).ok())
-        .or_else(|| scm.commit_for_anchor(&review.jj_change_id).ok())
-        .unwrap_or_else(|| review.initial_commit.clone())
+    seal_core::range::resolve_target_commit(scm, review)
 }
 
 /// Parse unified diff hunk headers to extract new-side line ranges.

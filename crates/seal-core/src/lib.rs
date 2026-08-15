@@ -8,6 +8,7 @@ pub mod events;
 pub mod jj;
 pub mod log;
 pub mod projection;
+pub mod range;
 pub mod scm;
 pub mod sealignore;
 pub mod version;

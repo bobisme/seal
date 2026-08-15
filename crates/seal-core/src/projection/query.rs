@@ -37,6 +37,12 @@ pub struct ReviewDetail {
     pub scm_kind: String,
     pub scm_anchor: String,
     pub initial_commit: String,
+    /// Base of the review range. `None` for reviews created before ranges
+    /// were supported; readers then use the parent of the target commit.
+    pub base_commit: Option<String>,
+    /// Target commit the approval applied to. `None` when the review is not
+    /// approved, or when it was approved before this was recorded.
+    pub approved_commit: Option<String>,
     pub final_commit: Option<String>,
     pub title: String,
     pub description: Option<String>,
@@ -270,7 +276,8 @@ impl ProjectionDb {
             .conn
             .query_row(
                 "SELECT 
-                    r.review_id, r.jj_change_id, r.scm_kind, r.scm_anchor, r.initial_commit, r.final_commit,
+                    r.review_id, r.jj_change_id, r.scm_kind, r.scm_anchor, r.initial_commit,
+                    r.base_commit, r.approved_commit, r.final_commit,
                     r.title, r.description, r.author, r.created_at, r.status,
                     r.status_changed_at, r.status_changed_by, r.abandon_reason,
                     COALESCE(s.thread_count, 0), COALESCE(s.open_thread_count, 0)
@@ -310,6 +317,8 @@ impl ProjectionDb {
             scm_kind: row.scm_kind,
             scm_anchor: row.scm_anchor,
             initial_commit: row.initial_commit,
+            base_commit: row.base_commit,
+            approved_commit: row.approved_commit,
             final_commit: row.final_commit,
             title: row.title,
             description: row.description,
@@ -761,6 +770,8 @@ struct ReviewDetailRow {
     scm_kind: String,
     scm_anchor: String,
     initial_commit: String,
+    base_commit: Option<String>,
+    approved_commit: Option<String>,
     final_commit: Option<String>,
     title: String,
     description: Option<String>,
@@ -782,17 +793,19 @@ impl ReviewDetailRow {
             scm_kind: row.get(2)?,
             scm_anchor: row.get(3)?,
             initial_commit: row.get(4)?,
-            final_commit: row.get(5)?,
-            title: row.get(6)?,
-            description: row.get(7)?,
-            author: row.get(8)?,
-            created_at: row.get(9)?,
-            status: row.get(10)?,
-            status_changed_at: row.get(11)?,
-            status_changed_by: row.get(12)?,
-            abandon_reason: row.get(13)?,
-            thread_count: row.get(14)?,
-            open_thread_count: row.get(15)?,
+            base_commit: row.get(5)?,
+            approved_commit: row.get(6)?,
+            final_commit: row.get(7)?,
+            title: row.get(8)?,
+            description: row.get(9)?,
+            author: row.get(10)?,
+            created_at: row.get(11)?,
+            status: row.get(12)?,
+            status_changed_at: row.get(13)?,
+            status_changed_by: row.get(14)?,
+            abandon_reason: row.get(15)?,
+            thread_count: row.get(16)?,
+            open_thread_count: row.get(17)?,
         })
     }
 }
@@ -865,6 +878,7 @@ mod tests {
                 scm_kind: Some("jj".to_string()),
                 scm_anchor: Some(format!("change-{review_id}")),
                 initial_commit: format!("commit-{review_id}"),
+                base_commit: None,
                 title: title.to_string(),
                 description: Some(format!("Description for {review_id}")),
             }),
@@ -1377,6 +1391,7 @@ mod tests {
                 review_id: review_id.to_string(),
                 vote,
                 reason: None,
+                target_commit: None,
             }),
         )
     }
@@ -1490,6 +1505,7 @@ mod tests {
                 review_id: review_id.to_string(),
                 vote,
                 reason: None,
+                target_commit: None,
             }),
         }
     }

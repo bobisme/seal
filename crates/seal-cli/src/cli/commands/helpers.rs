@@ -169,12 +169,7 @@ pub fn get_thread(seal_root: &Path, thread_id: &str) -> Result<ThreadDetail> {
 /// 3. Resolved commit for legacy `jj_change_id`
 /// 4. `initial_commit`
 pub fn resolve_review_thread_commit(scm: &dyn ScmRepo, review: &ReviewDetail) -> String {
-    review
-        .final_commit
-        .clone()
-        .or_else(|| scm.commit_for_anchor(&review.scm_anchor).ok())
-        .or_else(|| scm.commit_for_anchor(&review.jj_change_id).ok())
-        .unwrap_or_else(|| review.initial_commit.clone())
+    seal_core::range::resolve_target_commit(scm, review)
 }
 
 /// Create a "review not found" error.

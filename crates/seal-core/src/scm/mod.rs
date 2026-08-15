@@ -43,6 +43,43 @@ pub trait ScmRepo {
 
     fn file_exists(&self, rev: &str, path: &str) -> Result<bool>;
     fn show_file(&self, rev: &str, path: &str) -> Result<String>;
+
+    /// Count the commits in `base..target`.
+    ///
+    /// `None` means this backend cannot count the range.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the backend command fails.
+    fn count_commits_between(&self, _base: &str, _target: &str) -> Result<Option<usize>> {
+        Ok(None)
+    }
+
+    /// Report whether `ancestor` is an ancestor of `descendant`.
+    ///
+    /// Backends that cannot answer return `false`, so callers treat the two
+    /// commits as unrelated rather than assume a relationship.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the backend command fails.
+    fn is_ancestor(&self, _ancestor: &str, _descendant: &str) -> Result<bool> {
+        Ok(false)
+    }
+
+    /// Discover the base commit of the feature range that ends at `target`.
+    ///
+    /// The base is the commit the branch or workspace forked from, so
+    /// `base..target` holds every commit of the feature. `None` means the
+    /// backend found no fork point, and the caller falls back to
+    /// [`ScmRepo::parent_commit`], which covers one commit.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the backend command fails.
+    fn discover_base_commit(&self, _target: &str) -> Result<Option<String>> {
+        Ok(None)
+    }
 }
 
 /// Return the repository path represented by one file section from a git-format diff.

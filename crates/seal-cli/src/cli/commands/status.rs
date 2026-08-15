@@ -8,6 +8,7 @@ use crate::cli::commands::helpers::{ensure_initialized, open_services, review_no
 use crate::output::{Formatter, OutputFormat};
 use seal_core::jj::drift::{calculate_drift, DriftResult};
 use seal_core::projection::ThreadSummary;
+use seal_core::range::{approval_coverage, resolve_review_range};
 use seal_core::scm::{git_diff_changed_paths, ScmRepo};
 use seal_core::sealignore::{AllFilesIgnoredError, SealIgnore};
 
@@ -196,22 +197,15 @@ pub fn run_diff(
         return Err(review_not_found_error(seal_root, review_id));
     };
 
-    // Get target commit: resolve the review's change_id to its current commit
-    // - For merged reviews: use final_commit
-    // - For open/approved: resolve jj_change_id to current commit
-    // We resolve this FIRST so we can get its parent, which handles rewrites correctly
-    let target_commit = review
-        .final_commit
-        .clone()
-        .or_else(|| scm.commit_for_anchor(&review.scm_anchor).ok())
-        .or_else(|| scm.commit_for_anchor(&review.jj_change_id).ok())
-        .unwrap_or_else(|| review.initial_commit.clone());
-
-    // Get the base commit: parent of target_commit (not initial_commit)
-    // This shows ALL files changed in the review, even after rewrites
-    let base_commit = scm
-        .parent_commit(&target_commit)
-        .unwrap_or_else(|_| review.initial_commit.clone());
+    // Resolve the reviewed range.
+    // - The target is final_commit for merged reviews, otherwise the current
+    //   commit of the review anchor, which handles rewrites correctly.
+    // - The base is the review's persisted base, so all commits of a
+    //   multi-commit feature stay in the diff. Reviews created before ranges
+    //   were supported fall back to the parent of the target.
+    let range = resolve_review_range(scm, &review);
+    let target_commit = range.target;
+    let base_commit = range.base;
 
     // Get the diff between base and target
     let diff = scm.diff_git(&base_commit, &target_commit)?;
@@ -244,9 +238,16 @@ pub fn run_diff(
         .collect();
 
     // Build structured output
+    // Say when the standing approval predates this code.
+    let coverage = approval_coverage(scm, &review);
+
     let result = serde_json::json!({
         "review_id": review_id,
         "base_commit": base_commit,
+        "base_is_persisted": range.base_is_persisted,
+        "approval_stale": coverage.as_ref().map(seal_core::range::ApprovalCoverage::is_stale),
+        "approved_commit": coverage.as_ref().and_then(|c| c.approved_commit.clone()),
+        "uncovered_commits": coverage.as_ref().and_then(|c| c.uncovered_commits),
         "initial_commit": review.initial_commit,
         "target_commit": target_commit,
         "changed_files": changed_files,

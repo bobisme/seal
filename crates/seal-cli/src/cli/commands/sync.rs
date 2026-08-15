@@ -137,6 +137,7 @@ mod tests {
                 scm_kind: Some("jj".to_string()),
                 scm_anchor: Some("change123".to_string()),
                 initial_commit: "commit456".to_string(),
+                base_commit: None,
                 title: format!("Review {review_id}"),
                 description: Some("Test description".to_string()),
             }),

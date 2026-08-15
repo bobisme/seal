@@ -84,4 +84,32 @@ impl ScmRepo for JjScmRepo {
             .show_file(rev, path)
             .with_context(|| format!("Failed to show file {path} at {rev}"))
     }
+
+    fn is_ancestor(&self, ancestor: &str, descendant: &str) -> Result<bool> {
+        validate_anchor(ancestor)?;
+        validate_anchor(descendant)?;
+        self.inner.is_ancestor(ancestor, descendant)
+    }
+
+    fn count_commits_between(&self, base: &str, target: &str) -> Result<Option<usize>> {
+        validate_anchor(base)?;
+        validate_anchor(target)?;
+        self.inner.count_commits_between(base, target).map(Some)
+    }
+
+    fn discover_base_commit(&self, target: &str) -> Result<Option<String>> {
+        validate_anchor(target)?;
+
+        let target_commit = self.inner.get_commit_for_rev(target)?;
+        let Some(base) = self.inner.find_immutable_base(&target_commit)? else {
+            return Ok(None);
+        };
+
+        // The target is itself immutable, so it starts no feature range.
+        if base == target_commit {
+            return Ok(None);
+        }
+
+        Ok(Some(base))
+    }
 }
