@@ -55,7 +55,7 @@ Notes:
 
 For **bugs or feature requests**, create a bone in their repo first:
 ```bash
-cd <repo-path> && maw exec default -- bn create \
+cd <repo-path> && bn create \
   --title "<clear bug/feature title>" \
   --description "<repro steps, context, your use case>" \
   --tag bug \
@@ -78,7 +78,7 @@ multiplies the traffic and does not make an answer arrive sooner.
    ```
 2. Create a tracking bone that carries the anchor:
    ```bash
-   maw exec default -- bn create \
+   bn create \
      --title "[tracking] <summary of what you asked>" \
      --tag tracking \
      --description "Asked #<channel>: <what you asked>. Anchor: <id>. Read with: rite history --thread <id>" \

@@ -62,11 +62,11 @@ Reviews are anchored with backend-neutral SCM metadata (`scm_kind` + `scm_anchor
 
 ### How to Make Changes
 
-1. **Create a bone** to track your work: `maw exec default -- bn create --title "..." --description "..."`
-2. **Create a workspace** for your changes: `maw ws create <bone-id> --from main --description "<bone-title>"` — use the bone ID as workspace name; this gives you `ws/<bone-id>/`
-3. **Edit files in your workspace** (`ws/<name>/`), never in `ws/default/`
+1. **Create a bone** to track your work: `bn create --title "..." --description "..."`
+2. **Create a workspace** for your changes: `maw ws create <bone-id> --from main --description "<bone-title>"` — use the bone ID as workspace name; this gives you `.maw/workspaces/<bone-id>/`
+3. **Edit files in your workspace** (`.maw/workspaces/<name>/`), never in the trunk at the repo root
 4. **Merge when done**: `maw ws merge <name> --into default --destroy --message "feat: <bone-title>"` (use conventional commit prefix: `feat:`, `fix:`, `chore:`, etc.; swap `default` for a change id when merging back into a tracked change)
-5. **Close the bone**: `maw exec default -- bn done <id>`
+5. **Close the bone**: `bn done <id>`
 
 Do not create git branches manually — `maw ws create` handles branching for you. See [worker-loop.md](.agents/edict/worker-loop.md) for the full triage → start → work → finish cycle.
 
@@ -83,42 +83,41 @@ Do not create git branches manually — `maw ws create` handles branching for yo
 
 ### Directory Structure
 
-This project uses a **bare repo** layout. Source files live in workspaces under `ws/`, not at the project root.
+This project uses the **root** layout. The project root is the trunk working copy — source files, `.bones/`, config, and `AGENTS.md` live there. Extra agent workspaces live under `.maw/workspaces/`.
 
 ```
-project-root/          ← bare repo (no source files here)
-├── ws/
-│   ├── default/       ← main working copy (AGENTS.md, .bones/, src/, etc.)
-│   ├── bn-1abc/       ← agent workspace (named after bone ID)
-│   └── bn-2def/       ← another agent workspace
-├── .manifold/         ← maw metadata/artifacts
-├── .git/              ← git data (core.bare=true)
-└── AGENTS.md          ← stub redirecting to ws/default/AGENTS.md
+project-root/              ← trunk working copy (AGENTS.md, .bones/, src/, etc.)
+├── src/, AGENTS.md, …     ← your project files, edited here directly
+├── .maw/
+│   ├── workspaces/
+│   │   ├── bn-1abc/       ← agent workspace (named after bone ID)
+│   │   └── bn-2def/       ← another agent workspace
+│   └── manifold/          ← maw metadata/artifacts
+└── .git/                  ← git data
 ```
 
 **Key rules:**
-- `ws/default/` is the main workspace — bones, config, and project files live here
-- **Never merge or destroy the default workspace.** It is where other branches merge INTO, not something you merge.
-- Agent workspaces (`ws/<name>/`) are isolated Git worktrees managed by maw
-- Use `maw exec <ws> -- <command>` to run commands in a workspace context
-- Use `maw exec default -- bn ...` for bones commands (always in default workspace)
+- The project root is the trunk — bones, config, and project files live here, and you edit them directly
+- **Never merge or destroy the `default` workspace.** `default` names the trunk (the repo root); other workspaces merge INTO it, not the other way around.
+- Agent workspaces (`.maw/workspaces/<name>/`) are isolated Git worktrees managed by maw
+- Use `maw exec <ws> -- <command>` to run commands in a non-default workspace context
+- Run `bn ...` directly at the repo root for bones commands (no `maw exec` prefix needed — they always target the trunk)
 - Use `maw exec <ws> -- seal ...` for review commands (always in the review's workspace)
-- Never run `bn` or `seal` directly — always go through `maw exec`
 
 ### Bones Quick Reference
 
 | Operation | Command |
 |-----------|---------|
-| Triage (scores) | `maw exec default -- bn triage` |
-| Next bone | `maw exec default -- bn next` |
-| Next N bones | `maw exec default -- bn next N` (e.g., `bn next 4` for dispatch) |
-| Show bone | `maw exec default -- bn show <id>` |
-| Create | `maw exec default -- bn create --title "..." --description "..."` |
-| Start work | `maw exec default -- bn do <id>` |
-| Add comment | `maw exec default -- bn bone comment add <id> "message"` |
-| Close | `maw exec default -- bn done <id>` |
-| Add dependency | `maw exec default -- bn triage dep add <blocker> --blocks <blocked>` |
-| Search | `maw exec default -- bn search <query>` |
+| Triage (scores) | `bn triage` |
+| Next bone | `bn next` |
+| Next N bones | `bn next N` (e.g., `bn next 4` for dispatch) |
+| Show bone | `bn show <id>` |
+| Create | `bn create --title "..." --description "..."` |
+| Start work | `bn do <id>` |
+| Add comment | `bn bone comment add <id> "message"` |
+| Close | `bn done <id>` |
+| Add dependency | `bn triage dep add <blocker> --blocks <blocked>` |
+| Search | `bn search <query>` |
 
 Identity resolved from `$AGENT` env. No flags needed in agent loops.
 
@@ -217,7 +216,7 @@ hook for the reviewer. Capture the request id and block on the verdict:
 ```bash
 maw exec $WS -- seal reviews request <review-id> --reviewers $PROJECT-security --agent $AGENT
 req=$(rite send --agent $AGENT $PROJECT "Review requested: <review-id> @$PROJECT-security" -L review-request --format json | jq -r .id)
-maw exec default -- bn bone comment add <bone-id> "Review anchor: $req for <review-id>"
+bn bone comment add <bone-id> "Review anchor: $req for <review-id>"
 rite wait --agent $AGENT --reply-to "$req" -t 300 --format json
 ```
 
@@ -230,6 +229,26 @@ rite wait --agent $AGENT --reply-to "$req" -t 300 --format json
 **Reviewers**: post the verdict as a reply to the request that woke you
 (`--reply-to "$RITE_MESSAGE_ID"`, `-L review-done`). A top-level verdict leaves the author
 blocked until timeout.
+
+#### What a review covers
+
+`seal reviews create` finds the fork point of your branch or workspace, so the review
+covers every commit of the feature. It prints the range and commit count — check it.
+`--base <rev>` sets the range explicitly; `--base <target>~1` reviews the tip commit only.
+The base is persisted, so later commits extend the range instead of shifting it.
+
+#### Do not commit after the LGTM
+
+An approval records the commit it covered. Commit anything afterwards and
+`seal reviews mark-merged` exits 1: "the approval does not cover the current code".
+
+- **Fix**: get a fresh LGTM. A repeat vote moves the approval onto the new commit.
+  Reviewers — that repeat LGTM is what unblocks the merge, so never leave a re-review
+  unvoted.
+- `--allow-stale-approval` merges past the check. Use it only when the new commits are
+  provably outside what was reviewed, and say why in a bone comment.
+- Check first: `maw exec $WS -- seal diff <review-id> --format json` reports
+  `approval_stale`, `approved_commit` and `uncovered_commits`.
 
 ### Bus Communication
 
@@ -300,7 +319,7 @@ satisfies your own wait.
 4. **On exit 1 (no answer), create a local tracking bone** and move on. Record the anchor
    so the next check reads the thread instead of asking again:
    ```bash
-   maw exec default -- bn create --title "[tracking] <summary>" --tag tracking --kind task \
+   bn create --title "[tracking] <summary>" --tag tracking --kind task \
      --description "Asked #<project>: <question>. Anchor: <id>. Check: rite history --thread <id>"
    ```
 

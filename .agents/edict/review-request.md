@@ -22,7 +22,7 @@ The rite hook system watches for @mentions. When you send a message containing `
 1. Resolve agent identity: use `--agent` argument if provided, otherwise `$AGENT` env var. If neither is set, stop and instruct the user. Run `rite whoami --agent $AGENT` first to confirm; if it returns a name, use it.
 
 2. **Check the bone's risk tag** to determine review routing:
-   - Get bone details: `maw exec default -- bn show <bone-id>`
+   - Get bone details: `bn show <bone-id>`
    - Look for `risk:low`, `risk:high`, or `risk:critical` in tags
    - No risk tag = `risk:medium` (standard review)
 
@@ -30,7 +30,7 @@ The rite hook system watches for @mentions. When you send a message containing `
 
    **risk:low** — Skip review entirely:
    - Do NOT create a seal review
-   - Add self-review comment: `maw exec default -- bn bone comment add <bone-id> "Self-review: <brief what I verified>"`
+   - Add self-review comment: `bn bone comment add <bone-id> "Self-review: <brief what I verified>"`
    - Proceed directly to finish (skip remaining steps)
 
    **risk:medium** (default) — Standard review:
@@ -48,6 +48,17 @@ The rite hook system watches for @mentions. When you send a message containing `
    - List of approvers from `.edict.toml` → `project.criticalApprovers`
    - If no `criticalApprovers` configured, use project lead or fallback: `@$EDICT_PROJECT-lead`
 
+### What the review covers
+
+`seal reviews create` discovers the fork point of your branch or workspace, so the
+review covers every commit of the feature — not just the last one. It prints the
+resolved range and its commit count. Check that count matches the work you did.
+
+- `--base <rev>` sets the start of the range (exclusive): the review covers
+  `<rev>..<current commit>`.
+- `--base <target>~1` reviews only the tip commit.
+- The base is persisted, so later commits extend the range instead of shifting it.
+
 4. If requesting a **specialist reviewer** (e.g., security):
    ```bash
    # Step 1: Create review with reviewer assignment (one command)
@@ -59,7 +70,7 @@ The rite hook system watches for @mentions. When you send a message containing `
      -L review-request --format json | jq -r .id)
 
    # Step 3: Record the anchor, then block on the verdict
-   maw exec default -- bn bone comment add <bone-id> "Review anchor: $req for <review-id>"
+   bn bone comment add <bone-id> "Review anchor: $req for <review-id>"
    rite wait --agent $AGENT --reply-to "$req" -t 300 --format json
    ```
 
@@ -83,7 +94,7 @@ The rite hook system watches for @mentions. When you send a message containing `
 
 5. **Post review details to the bone** for crash recovery:
    ```bash
-   maw exec default -- bn bone comment add <bone-id> "Review created: <review-id> in workspace <ws-name> (ws/<ws-name>)"
+   bn bone comment add <bone-id> "Review created: <review-id> in workspace <ws-name> (.maw/workspaces/<ws-name>)"
    ```
    Include: review ID and workspace name. This lets another agent find the review and workspace if the session crashes.
 
