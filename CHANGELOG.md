@@ -8,11 +8,20 @@ prior to v0.27.0, see the [git tags](https://github.com/bobisme/seal/tags).
 
 ## [Unreleased]
 
+## [0.28.0] - 2026-08-15
+
+A review now covers a commit range, and an approval now records the code it covered.
+Both were single-commit assumptions that let work reach `merged` unreviewed.
+
 ### Added
 - `seal reviews create --base <rev>` sets the exclusive start of the reviewed range.
   Reviews persist the base on the `ReviewCreated` event, so the range no longer shifts
   as commits are added. `seal reviews create` prints the resolved range and its commit
   count, and `seal diff --format json` reports `base_is_persisted`.
+- Approvals and votes record the commit they applied to. `seal diff --format json` reports
+  `approval_stale`, `approved_commit`, and `uncovered_commits`. `seal reviews request` warns
+  when the standing approval no longer covers the code.
+- `seal reviews mark-merged --allow-stale-approval` merges past that check.
 
 ### Fixed
 - A review of a multi-commit feature covered only the last commit. The base was always the
@@ -23,24 +32,24 @@ prior to v0.27.0, see the [git tags](https://github.com/bobisme/seal/tags).
 - Adding a commit after review creation moved the reviewed range forward and dropped
   earlier commits out of `seal diff`, `seal review`, and the TUI. The persisted base keeps
   the range anchored.
-
-Reviews created before this release keep their previous single-commit scope. Their base is
-still the parent of the target, so no existing review changes what it covers.
-
-### Added
-- Approvals and votes record the commit they applied to. `seal diff --format json` reports
-  `approval_stale`, `approved_commit`, and `uncovered_commits`. `seal reviews request` warns
-  when the standing approval no longer covers the code.
-- `seal reviews mark-merged --allow-stale-approval` merges past that check.
-
-### Fixed
 - An approved review could be merged after new commits landed on it. Approvals recorded no
   commit, so nothing could tell that the approval predated the code. `seal reviews mark-merged`
   now refuses when commits landed after the approval, and names the fix. A repeat LGTM moves
   the approval onto the new commit and clears the block.
 
-Reviews approved before this release carry no approved commit. They warn on merge rather than
-block, so upgrading does not freeze work already in flight.
+### Upgrading
+
+Existing reviews keep their current scope and do not change what they cover:
+
+- Reviews created before this release have no persisted base. Their base stays the parent of
+  the target, so they still cover one commit.
+- Reviews approved before this release have no approved commit. `mark-merged` warns for them
+  rather than blocking, so upgrading does not freeze work already in flight. Only a proven
+  uncovered commit refuses a merge.
+
+`.seal/index.db` gains `reviews.base_commit`, `reviews.approved_commit`, and
+`reviewer_votes.voted_commit`. The columns are added in place on first run; no manual
+migration is needed, and the database rebuilds from the event logs either way.
 
 ## [0.27.2] - 2026-04-28
 
