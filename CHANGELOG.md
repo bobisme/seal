@@ -8,6 +8,8 @@ prior to v0.27.0, see the [git tags](https://github.com/bobisme/seal/tags).
 
 ## [Unreleased]
 
+## [0.29.0] - 2026-08-25
+
 ### Added
 - `seal reviews retarget <id>` moves an open or approved review to the current workspace
   target. The append-only `ReviewRetargeted` event records both SCM anchors and resolved
@@ -96,7 +98,9 @@ migration is needed, and the database rebuilds from the event logs either way.
   - Output summarizes `imported` / `skipped_level` / `skipped_duplicate` /
     `skipped_missing_file` / `skipped_no_location` plus per-finding thread IDs.
 
-[Unreleased]: https://github.com/bobisme/seal/compare/v0.27.2...HEAD
+[Unreleased]: https://github.com/bobisme/seal/compare/v0.29.0...HEAD
+[0.29.0]: https://github.com/bobisme/seal/compare/v0.28.0...v0.29.0
+[0.28.0]: https://github.com/bobisme/seal/compare/v0.27.2...v0.28.0
 [0.27.2]: https://github.com/bobisme/seal/releases/tag/v0.27.2
 [0.27.1]: https://github.com/bobisme/seal/releases/tag/v0.27.1
 [0.27.0]: https://github.com/bobisme/seal/releases/tag/v0.27.0
