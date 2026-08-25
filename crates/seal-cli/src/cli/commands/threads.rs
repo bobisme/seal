@@ -111,8 +111,7 @@ pub fn run_threads_list(
                 let comments = services.comments().list(&t.thread_id).unwrap_or_default();
                 comments.iter().any(|c| {
                     chrono::DateTime::parse_from_rfc3339(&c.created_at)
-                        .map(|dt| dt.with_timezone(&chrono::Utc) >= since_dt)
-                        .unwrap_or(true)
+                        .map_or(true, |dt| dt.with_timezone(&chrono::Utc) >= since_dt)
                 })
             })
             .collect()

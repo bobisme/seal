@@ -27,8 +27,8 @@ use serde::Serialize;
 
 use crate::events::{
     CodeSelection, CommentAdded, Event, EventEnvelope, ReviewAbandoned, ReviewApproved,
-    ReviewCreated, ReviewMerged, ReviewerVoted, ReviewersRequested, ThreadCreated, ThreadReopened,
-    ThreadResolved,
+    ReviewCreated, ReviewMerged, ReviewRetargeted, ReviewerVoted, ReviewersRequested,
+    ThreadCreated, ThreadReopened, ThreadResolved,
 };
 use crate::log::{list_review_ids, read_all_reviews, AppendLog, ReviewLog};
 use crate::scm::BackendDetection;
@@ -777,6 +777,7 @@ fn rebuild_projection_with_orphan_detection(
 fn event_review_id(event: &Event) -> Option<&str> {
     match event {
         Event::ReviewCreated(e) => Some(&e.review_id),
+        Event::ReviewRetargeted(e) => Some(&e.review_id),
         Event::ReviewersRequested(e) => Some(&e.review_id),
         Event::ReviewerVoted(e) => Some(&e.review_id),
         Event::ReviewApproved(e) => Some(&e.review_id),
@@ -1495,6 +1496,7 @@ fn apply_event_inner(conn: &Connection, envelope: &EventEnvelope) -> Result<()> 
 
     match &envelope.event {
         Event::ReviewCreated(e) => apply_review_created(conn, e, author, ts),
+        Event::ReviewRetargeted(e) => apply_review_retargeted(conn, e, author, ts),
         Event::ReviewersRequested(e) => apply_reviewers_requested(conn, e, author, ts),
         Event::ReviewerVoted(e) => apply_reviewer_voted(conn, e, author, ts),
         Event::ReviewApproved(e) => apply_review_approved(conn, e, author, ts),
@@ -1535,6 +1537,57 @@ fn apply_review_created(
             ts.to_rfc3339(),
         ],
     )?;
+    Ok(())
+}
+
+fn apply_review_retargeted(
+    conn: &Connection,
+    event: &ReviewRetargeted,
+    author: &str,
+    ts: &DateTime<Utc>,
+) -> Result<()> {
+    if event.old_target_commit == event.new_target_commit {
+        anyhow::bail!(
+            "ReviewRetargeted for {} does not change the resolved target commit",
+            event.review_id
+        );
+    }
+
+    let updated = conn.execute(
+        "UPDATE reviews SET
+            scm_anchor = ?,
+            status = 'open',
+            approved_commit = NULL,
+            status_changed_at = ?,
+            status_changed_by = ?
+        WHERE review_id = ?
+          AND scm_anchor = ?
+          AND author = ?
+          AND status IN ('open', 'approved')",
+        params![
+            event.new_scm_anchor,
+            ts.to_rfc3339(),
+            author,
+            event.review_id,
+            event.old_scm_anchor,
+            author,
+        ],
+    )?;
+
+    if updated != 1 {
+        anyhow::bail!(
+            "ReviewRetargeted for {} does not match the projected review target or status",
+            event.review_id
+        );
+    }
+
+    // Votes remain in the append-only log for audit history. They are removed
+    // only from the effective projection because they cover the old target.
+    conn.execute(
+        "DELETE FROM reviewer_votes WHERE review_id = ?",
+        params![event.review_id],
+    )?;
+
     Ok(())
 }
 
@@ -1756,6 +1809,7 @@ fn apply_comment_added(
 const fn event_type_name(event: &Event) -> &'static str {
     match event {
         Event::ReviewCreated(_) => "ReviewCreated",
+        Event::ReviewRetargeted(_) => "ReviewRetargeted",
         Event::ReviewersRequested(_) => "ReviewersRequested",
         Event::ReviewerVoted(_) => "ReviewerVoted",
         Event::ReviewApproved(_) => "ReviewApproved",
@@ -2861,6 +2915,60 @@ mod tests {
                 .unwrap();
             assert_eq!(status, "merged");
         }
+    }
+
+    #[test]
+    fn test_retarget_reopens_review_and_clears_effective_votes() {
+        let db = ProjectionDb::open_in_memory().unwrap();
+        db.init_schema().unwrap();
+        apply_event(&db, &make_review_created("cr-001")).unwrap();
+
+        apply_event(
+            &db,
+            &EventEnvelope::new(
+                "reviewer",
+                Event::ReviewerVoted(ReviewerVoted {
+                    review_id: "cr-001".to_string(),
+                    vote: crate::events::VoteType::Lgtm,
+                    reason: None,
+                    target_commit: Some("commit456".to_string()),
+                }),
+            ),
+        )
+        .unwrap();
+        apply_event(
+            &db,
+            &EventEnvelope::new(
+                "reviewer",
+                Event::ReviewApproved(ReviewApproved {
+                    review_id: "cr-001".to_string(),
+                    target_commit: Some("commit456".to_string()),
+                }),
+            ),
+        )
+        .unwrap();
+
+        apply_event(
+            &db,
+            &EventEnvelope::new(
+                "test_author",
+                Event::ReviewRetargeted(ReviewRetargeted {
+                    review_id: "cr-001".to_string(),
+                    old_scm_anchor: "change123".to_string(),
+                    new_scm_anchor: "change456".to_string(),
+                    old_target_commit: "commit456".to_string(),
+                    new_target_commit: "commit789".to_string(),
+                }),
+            ),
+        )
+        .unwrap();
+
+        let review = db.get_review("cr-001").unwrap().unwrap();
+        assert_eq!(review.scm_anchor, "change456");
+        assert_eq!(review.status, "open");
+        assert_eq!(review.approved_commit, None);
+        assert!(review.votes.is_empty());
+        assert_eq!(review.status_changed_by.as_deref(), Some("test_author"));
     }
 
     /// Same as eval data test but with trailing empty line (as found in eval).

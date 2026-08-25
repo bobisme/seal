@@ -62,17 +62,13 @@ pub fn make_comment_id(thread_id: &str, comment_number: u32) -> String {
 /// Check if a string looks like a valid review ID
 #[must_use]
 pub fn is_review_id(s: &str) -> bool {
-    parse_id(s)
-        .map(|parsed| parsed.prefix == "cr" && parsed.hash.len() >= 3)
-        .unwrap_or(false)
+    parse_id(s).is_ok_and(|parsed| parsed.prefix == "cr" && parsed.hash.len() >= 3)
 }
 
 /// Check if a string looks like a valid thread ID
 #[must_use]
 pub fn is_thread_id(s: &str) -> bool {
-    parse_id(s)
-        .map(|parsed| parsed.prefix == "th" && parsed.hash.len() >= 3)
-        .unwrap_or(false)
+    parse_id(s).is_ok_and(|parsed| parsed.prefix == "th" && parsed.hash.len() >= 3)
 }
 
 /// Check if a string looks like a valid comment ID (th-xxx.N format)
@@ -88,7 +84,7 @@ pub fn is_comment_id(s: &str) -> bool {
         return false;
     }
     // Second part must be a positive integer
-    parts[1].parse::<u32>().map(|n| n > 0).unwrap_or(false)
+    parts[1].parse::<u32>().is_ok_and(|n| n > 0)
 }
 
 #[cfg(test)]

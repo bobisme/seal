@@ -53,6 +53,7 @@ Every command needs an agent identity. Pass `--agent <name>`, or set `SEAL_AGENT
 ```bash
 seal reviews create --title "..."              # start a review
 seal reviews create --title "..." --base <rev> # set the start of the reviewed range
+seal reviews retarget <id>                      # move a review to the current target
 seal comment <id> --file <path> --line N "..." # comment on a line
 seal reply <thread-id> "..."                   # reply in a thread
 seal lgtm <id> -m "..."                        # approve
@@ -70,6 +71,11 @@ branch or workspace forked and reviews every commit of the feature. It prints th
 chose. Use `--base <rev>` to state the range yourself, for example `--base HEAD~1` to review
 only the current commit. The base is persisted, so commits added later extend the review
 instead of pushing earlier work out of it.
+
+Detached Git workspaces use immutable commit anchors. After you commit review fixes there,
+run `seal reviews retarget <id>` as the review author. Seal records the old and new targets,
+reopens the review, and clears effective votes. Then request reviewers again. This keeps one
+audit trail while requiring every approval to cover the new code.
 
 ## TUI for Humans
 

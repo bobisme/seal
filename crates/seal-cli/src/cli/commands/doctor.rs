@@ -348,7 +348,7 @@ fn check_index_sync(repo_root: &Path) -> CheckResult {
             match sync_from_log_with_backup(&db, &log, Some(&seal_dir)) {
                 Ok(events_processed) => {
                     // Get some stats
-                    let review_count = db.list_reviews(None, None).map(|r| r.len()).unwrap_or(0);
+                    let review_count = db.list_reviews(None, None).map_or(0, |r| r.len());
                     CheckResult::pass(
                         "index_sync",
                         &format!(

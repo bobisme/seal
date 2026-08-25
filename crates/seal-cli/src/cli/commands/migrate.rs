@@ -25,6 +25,7 @@ fn is_legacy_review_id(s: &str) -> bool {
 fn event_dedup_key(e: &EventEnvelope) -> String {
     let specific = match &e.event {
         Event::ReviewCreated(ev) => ev.review_id.clone(),
+        Event::ReviewRetargeted(ev) => ev.review_id.clone(),
         Event::ReviewersRequested(ev) => ev.review_id.clone(),
         Event::ReviewerVoted(ev) => format!("{}:{}", ev.review_id, e.author),
         Event::ReviewApproved(ev) => ev.review_id.clone(),
@@ -47,6 +48,7 @@ fn event_dedup_key(e: &EventEnvelope) -> String {
 const fn event_type_label(event: &Event) -> &'static str {
     match event {
         Event::ReviewCreated(_) => "ReviewCreated",
+        Event::ReviewRetargeted(_) => "ReviewRetargeted",
         Event::ReviewersRequested(_) => "ReviewersRequested",
         Event::ReviewerVoted(_) => "ReviewerVoted",
         Event::ReviewApproved(_) => "ReviewApproved",
@@ -261,7 +263,7 @@ pub fn run_migrate(
 
         // Sort by timestamp (should already be sorted, but be safe)
         let mut sorted_events = review_events.clone();
-        sorted_events.sort_by(|a, b| a.ts.cmp(&b.ts));
+        sorted_events.sort_by_key(|event| event.ts);
 
         for event in &sorted_events {
             log.append(event)?;
@@ -381,7 +383,7 @@ fn run_remigrate_from_backup(seal_root: &Path, dry_run: bool, format: OutputForm
             existing_events.iter().map(event_dedup_key).collect();
 
         let mut sorted = backup_review_events.clone();
-        sorted.sort_by(|a, b| a.ts.cmp(&b.ts));
+        sorted.sort_by_key(|event| event.ts);
 
         let mut recovered_for_review = 0;
         for event in &sorted {
@@ -452,6 +454,7 @@ fn resolve_review_id<'a>(
 ) -> Option<&'a str> {
     match event {
         Event::ReviewCreated(e) => Some(&e.review_id),
+        Event::ReviewRetargeted(e) => Some(&e.review_id),
         Event::ReviewersRequested(e) => Some(&e.review_id),
         Event::ReviewerVoted(e) => Some(&e.review_id),
         Event::ReviewApproved(e) => Some(&e.review_id),

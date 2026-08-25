@@ -405,15 +405,15 @@ pub fn draw_help_bar_ext(
     // Right-aligned hints
     let separator = "  ";
     let sep_len = separator.len();
-    let total_width: usize = if hints.is_empty() {
+    let total_width: u32 = if hints.is_empty() {
         0
     } else {
         hints.iter().map(HotkeyHint::width).sum::<usize>() + hints.len().saturating_sub(1) * sep_len
-    };
+    } as u32;
 
     let x_start = if area.width > 0 && !hints.is_empty() {
-        if (total_width as u32) + padding <= area.width {
-            area.x + area.width - total_width as u32 - padding
+        if total_width + padding <= area.width {
+            area.x + area.width - total_width - padding
         } else {
             area.x + padding.min(area.width)
         }

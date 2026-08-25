@@ -8,6 +8,13 @@ prior to v0.27.0, see the [git tags](https://github.com/bobisme/seal/tags).
 
 ## [Unreleased]
 
+### Added
+- `seal reviews retarget <id>` moves an open or approved review to the current workspace
+  target. The append-only `ReviewRetargeted` event records both SCM anchors and resolved
+  commits. Retargeting reopens approval and clears effective votes, so reviewers must inspect
+  and approve the new code. Only the original author can retarget, and the existing review
+  base must remain an ancestor of the new target.
+
 ## [0.28.0] - 2026-08-15
 
 A review now covers a commit range, and an approval now records the code it covered.

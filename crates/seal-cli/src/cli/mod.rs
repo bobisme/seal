@@ -330,6 +330,12 @@ pub enum ReviewsCommands {
         reviewers: String,
     },
 
+    /// Move a review to the current workspace target and require fresh votes
+    Retarget {
+        /// Review ID
+        review_id: String,
+    },
+
     /// Approve a review
     Approve {
         /// Review ID

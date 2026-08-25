@@ -342,6 +342,41 @@ pub fn run_reviews_request(
     Ok(())
 }
 
+/// Move an existing review to the current workspace target.
+#[tracing::instrument(skip(repo_root, scm, format))]
+pub fn run_reviews_retarget(
+    repo_root: &Path,
+    scm: &dyn ScmRepo,
+    review_id: &str,
+    author: Option<&str>,
+    format: OutputFormat,
+) -> Result<()> {
+    ensure_initialized(repo_root)?;
+
+    let services = open_services(repo_root)?;
+    let retargeted = services.reviews().retarget(scm, review_id, author)?;
+
+    let result = serde_json::json!({
+        "review_id": retargeted.review_id,
+        "status": "open",
+        "old_scm_anchor": retargeted.old_scm_anchor,
+        "new_scm_anchor": retargeted.new_scm_anchor,
+        "old_target_commit": retargeted.old_target_commit,
+        "target_commit": retargeted.new_target_commit,
+        "approval_reset": retargeted.approval_reset,
+        "cleared_votes": retargeted.cleared_votes,
+        "next_steps": [
+            format!("seal reviews request {review_id} --reviewers <name>"),
+            format!("Ask each reviewer to inspect the new target and run 'seal lgtm {review_id}'"),
+        ],
+    });
+
+    let formatter = Formatter::new(format);
+    formatter.print(&result)?;
+
+    Ok(())
+}
+
 /// Approve a review.
 pub fn run_reviews_approve(
     repo_root: &Path,
@@ -712,8 +747,7 @@ pub fn run_review(
                     .into_iter()
                     .filter(|c| {
                         DateTime::parse_from_rfc3339(&c.created_at)
-                            .map(|dt| dt.with_timezone(&Utc) >= since_dt)
-                            .unwrap_or(true)
+                            .map_or(true, |dt| dt.with_timezone(&Utc) >= since_dt)
                     })
                     .collect()
             } else {
@@ -852,8 +886,7 @@ pub fn run_review(
                 .into_iter()
                 .filter(|c| {
                     DateTime::parse_from_rfc3339(&c.created_at)
-                        .map(|dt| dt.with_timezone(&Utc) >= since_dt)
-                        .unwrap_or(true)
+                        .map_or(true, |dt| dt.with_timezone(&Utc) >= since_dt)
                 })
                 .collect()
         } else {

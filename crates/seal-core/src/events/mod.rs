@@ -29,6 +29,8 @@ pub struct EventEnvelope {
 pub enum Event {
     /// A new review was created
     ReviewCreated(ReviewCreated),
+    /// A review target was moved to new code
+    ReviewRetargeted(ReviewRetargeted),
     /// Reviewers were requested for a review
     ReviewersRequested(ReviewersRequested),
     /// A reviewer voted on a review (LGTM or block)
@@ -78,6 +80,19 @@ pub struct ReviewCreated {
     /// Optional description
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+}
+
+/// Audit record for moving an existing review to a new SCM target.
+///
+/// The old and new anchors explain how each target was selected. The resolved
+/// commits make the transition stable even when a named SCM anchor later moves.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReviewRetargeted {
+    pub review_id: String,
+    pub old_scm_anchor: String,
+    pub new_scm_anchor: String,
+    pub old_target_commit: String,
+    pub new_target_commit: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -286,6 +301,34 @@ mod tests {
                 assert_eq!(r.title, "Test Review");
             }
             _ => panic!("Expected ReviewCreated"),
+        }
+    }
+
+    #[test]
+    fn test_review_retargeted_roundtrip() {
+        let event = EventEnvelope::new(
+            "review-author",
+            Event::ReviewRetargeted(ReviewRetargeted {
+                review_id: "cr-abc1".to_string(),
+                old_scm_anchor: "detached:abc123".to_string(),
+                new_scm_anchor: "detached:def456".to_string(),
+                old_target_commit: "abc123".to_string(),
+                new_target_commit: "def456".to_string(),
+            }),
+        );
+
+        let json = event.to_json_line().unwrap();
+        let parsed = EventEnvelope::from_json_line(&json).unwrap();
+
+        match parsed.event {
+            Event::ReviewRetargeted(retargeted) => {
+                assert_eq!(retargeted.review_id, "cr-abc1");
+                assert_eq!(retargeted.old_scm_anchor, "detached:abc123");
+                assert_eq!(retargeted.new_scm_anchor, "detached:def456");
+                assert_eq!(retargeted.old_target_commit, "abc123");
+                assert_eq!(retargeted.new_target_commit, "def456");
+            }
+            _ => panic!("Expected ReviewRetargeted"),
         }
     }
 

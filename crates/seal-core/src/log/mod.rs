@@ -586,7 +586,7 @@ pub fn read_all_reviews(seal_root: &Path) -> Result<Vec<EventEnvelope>> {
     }
 
     // Sort by timestamp
-    all_events.sort_by(|a, b| a.ts.cmp(&b.ts));
+    all_events.sort_by_key(|event| event.ts);
 
     Ok(all_events)
 }

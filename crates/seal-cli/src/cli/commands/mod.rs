@@ -20,7 +20,7 @@ pub use migrate::run_migrate;
 pub use reviews::{
     parse_since, run_block, run_inbox, run_lgtm, run_review, run_reviews_abandon,
     run_reviews_approve, run_reviews_create, run_reviews_list, run_reviews_merge,
-    run_reviews_request, run_reviews_show,
+    run_reviews_request, run_reviews_retarget, run_reviews_show,
 };
 pub use sarif::run_sarif_import;
 pub use status::{run_diff, run_status};
