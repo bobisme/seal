@@ -54,12 +54,6 @@ merge_timeout_sec = 120
 model = "haiku"
 timeout = 600
 
-[agents.reviewer]
-model = "opus"
-max_loops = 20
-pause = 2
-timeout = 600
-
 # Model tier pools for load balancing
 # Each tier maps to a list of "provider/model:thinking" strings
 [models]
