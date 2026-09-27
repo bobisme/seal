@@ -217,6 +217,105 @@ pub fn parse_hunks(diff: &str) -> Result<Vec<Hunk>> {
     Ok(hunks)
 }
 
+/// Compute the last old-file line number (1-indexed) that a hunk spans.
+///
+/// `old_count == 0` marks a pure-addition or new-file hunk that consumes no
+/// old lines; its effective end is one line *before* `old_start` (saturating
+/// at 0 so `old_start == 0` never underflows), which is exactly what lets a
+/// pure-addition hunk be treated as "before" any target line at or after
+/// `old_start` (see `bn-2hu`/commit `3df6d2b`).
+///
+/// For a normal hunk (`old_count > 0`), the end is `old_start + old_count - 1`.
+/// `HunkHeader::parse` accepts any `u32` pair, so a header can claim a span
+/// that does not fit in `u32` (e.g. `@@ -4294967295,2 +1,1 @@`). Rather than
+/// overflow (panic in debug, wrap in release), this returns `None` to signal
+/// "this header cannot describe a real hunk" so the caller can report an
+/// error instead of computing a wrong or out-of-range line.
+///
+/// # Postconditions (see the `proofs` module for the Kani proof)
+/// - Never panics, for any `u32` inputs.
+/// - If it returns `Some(end)`, then `end as u64 + 1 >= old_start as u64`
+///   (i.e. `end >= old_start - 1`, stated without underflow).
+/// - If it returns `Some(end)` and `old_count > 0`, then
+///   `end as u64 == old_start as u64 + old_count as u64 - 1` exactly.
+#[must_use]
+const fn hunk_old_end(old_start: u32, old_count: u32) -> Option<u32> {
+    if old_count == 0 {
+        Some(old_start.saturating_sub(1))
+    } else {
+        match old_start.checked_add(old_count) {
+            Some(sum) => sum.checked_sub(1),
+            None => None,
+        }
+    }
+}
+
+/// Compute the new value of a drifting line counter after passing through a
+/// hunk that lies **entirely before** it, given the hunk's old/new line
+/// counts.
+///
+/// The net effect of such a hunk is `+new_count` then `-old_count` (insertions
+/// push the line down, deletions pull it up). Both legs are computed with
+/// checked arithmetic: this returns `None` if applying the shift would not
+/// fit in `u32` (would overflow past `u32::MAX`, or underflow below 0)
+/// instead of silently wrapping or clamping to a value that no longer
+/// corresponds to any real line. For any hunk that actually arose from a real
+/// diff of a real file, this cannot happen (see `calculate_drift`'s
+/// documentation); it is only reachable via a header describing an
+/// impossible span.
+///
+/// # Postconditions (see the `proofs` module for the Kani proof)
+/// - Never panics, for any `u32` inputs.
+/// - If it returns `Some(shifted)`, then
+///   `shifted as i64 == current_line as i64 + new_count as i64 - old_count as i64`
+///   exactly.
+#[must_use]
+const fn shift_for_hunk_before(current_line: u32, old_count: u32, new_count: u32) -> Option<u32> {
+    if new_count > old_count {
+        current_line.checked_add(new_count - old_count)
+    } else {
+        current_line.checked_sub(old_count - new_count)
+    }
+}
+
+/// Advance the per-line `(old_line, new_line)` counters used while walking a
+/// hunk's body, given the kind of the line just processed.
+///
+/// A real hunk body has at most a handful of lines, so this can never
+/// overflow for an honest header. But nothing cross-validates a hunk's
+/// declared `old_count`/`new_count` against the number of lines actually
+/// present in its body (`Hunk::parse` just reads until the next `@@` or `diff
+/// --git`), so an adversarial header combined with a long body can drive
+/// `old_start`/`new_start` (and therefore these counters) arbitrarily close
+/// to `u32::MAX`. This returns `None` rather than overflow (panic in debug,
+/// wrap in release) so the walk can be aborted with an error.
+///
+/// # Postconditions (see the `proofs` module for the Kani proof)
+/// - Never panics, for any `u32` inputs and any `DiffLine`.
+/// - If it returns `Some((old, new))`, `old`/`new` equal `old_line`/`new_line`
+///   plus exactly the increments implied by `diff_line` (0 or 1 each).
+#[must_use]
+const fn advance_hunk_line(
+    old_line: u32,
+    new_line: u32,
+    diff_line: &DiffLine,
+) -> Option<(u32, u32)> {
+    match diff_line {
+        DiffLine::Context => match (old_line.checked_add(1), new_line.checked_add(1)) {
+            (Some(o), Some(n)) => Some((o, n)),
+            _ => None,
+        },
+        DiffLine::Deleted => match old_line.checked_add(1) {
+            Some(o) => Some((o, new_line)),
+            None => None,
+        },
+        DiffLine::Added => match new_line.checked_add(1) {
+            Some(n) => Some((old_line, n)),
+            None => None,
+        },
+    }
+}
+
 /// Calculate drift for a line anchor between two commits.
 ///
 /// # Arguments
@@ -265,14 +364,15 @@ pub fn calculate_drift(
         // Special handling for old_count=0 (pure-addition or new-file hunks):
         // When old_count=0, the hunk doesn't consume any old lines, so the
         // effective end is old_start - 1 (no lines spanned in the old file).
-        let hunk_old_end = if hunk.header.old_count == 0 {
-            // Pure addition: hunk affects insertions at old_start, but doesn't
-            // consume any existing lines. Treat as "insertion point is before".
-            hunk.header.old_start.saturating_sub(1)
-        } else {
-            // Normal hunk: old_start + (old_count - 1) gives the last old line
-            hunk.header.old_start + hunk.header.old_count - 1
-        };
+        let hunk_old_end =
+            hunk_old_end(hunk.header.old_start, hunk.header.old_count).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "hunk header describes an old-file span that does not fit in u32: \
+                     old_start={}, old_count={}",
+                    hunk.header.old_start,
+                    hunk.header.old_count
+                )
+            })?;
 
         if hunk.header.old_start > original_line {
             // Hunk is entirely after our line - no effect
@@ -283,14 +383,16 @@ pub fn calculate_drift(
             // Hunk is entirely before our line - adjust by net change.
             // This now correctly handles pure-addition hunks (old_count=0)
             // because hunk_old_end will be old_start - 1, allowing the shift.
-            let old_lines = hunk.header.old_count;
-            let new_lines = hunk.header.new_count;
-
-            if new_lines > old_lines {
-                current_line += new_lines - old_lines;
-            } else {
-                current_line = current_line.saturating_sub(old_lines - new_lines);
-            }
+            current_line =
+                shift_for_hunk_before(current_line, hunk.header.old_count, hunk.header.new_count)
+                    .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "hunk shift does not fit in u32: current_line={current_line}, \
+                     old_count={}, new_count={}",
+                        hunk.header.old_count,
+                        hunk.header.new_count
+                    )
+                })?;
             continue;
         }
 
@@ -309,8 +411,6 @@ pub fn calculate_drift(
                         found_as_context = true;
                         break;
                     }
-                    old_line += 1;
-                    new_line += 1;
                 }
                 DiffLine::Deleted => {
                     if old_line == original_line {
@@ -322,12 +422,16 @@ pub fn calculate_drift(
                         }
                         return Ok(DriftResult::Deleted);
                     }
-                    old_line += 1;
                 }
-                DiffLine::Added => {
-                    new_line += 1;
-                }
+                DiffLine::Added => {}
             }
+            (old_line, new_line) =
+                advance_hunk_line(old_line, new_line, diff_line).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "hunk line walk overflowed u32 counters: old_line={old_line}, \
+                         new_line={new_line}"
+                    )
+                })?;
         }
 
         // If we walked through without finding it as context, it might be modified
@@ -348,11 +452,106 @@ pub fn calculate_drift(
     }
 }
 
+/// Kani proofs for the three pure functions that replaced the unchecked u32
+/// arithmetic in `calculate_drift`'s hunk walk (`bn-fx8g`).
+///
+/// Each harness is complete, not approximate: `kani::any()` ranges over the
+/// full `u32` domain with no `kani::assume` narrowing it, so these are
+/// unconditional proofs over every possible hunk header / line-counter value,
+/// not just the ones a well-formed diff would produce. That is deliberate --
+/// the whole point is that `HunkHeader::parse` does not validate its input,
+/// so the arithmetic must be safe even for headers no real diff would emit.
+#[cfg(kani)]
+mod proofs {
+    use super::{advance_hunk_line, hunk_old_end, shift_for_hunk_before, DiffLine};
+
+    /// `hunk_old_end` never panics, and when it returns a value that value is
+    /// never less than `old_start - 1` (stated as `end + 1 >= old_start` to
+    /// avoid underflow in the property itself) and, for `old_count > 0`,
+    /// equals `old_start + old_count - 1` exactly. It also always succeeds
+    /// (never returns `None`) for `old_count == 0`, since
+    /// `old_start.saturating_sub(1)` cannot fail -- a harness that only
+    /// constrained the `Some` case would pass vacuously if that branch were
+    /// deleted and silently started returning `None` instead.
+    #[kani::proof]
+    fn hunk_old_end_never_panics_and_is_in_range() {
+        let old_start: u32 = kani::any();
+        let old_count: u32 = kani::any();
+
+        let result = hunk_old_end(old_start, old_count);
+
+        if old_count == 0 {
+            assert!(result == Some(old_start.saturating_sub(1)));
+        }
+
+        if let Some(end) = result {
+            // end >= old_start - 1, restated without underflow risk.
+            assert!(u64::from(end) + 1 >= u64::from(old_start));
+            if old_count > 0 {
+                assert!(u64::from(end) == u64::from(old_start) + u64::from(old_count) - 1);
+            }
+        }
+    }
+
+    /// `shift_for_hunk_before` never panics, and when it returns a value that
+    /// value equals `current_line + new_count - old_count` exactly (computed
+    /// in `i64` to state the identity without wraparound). It also always
+    /// succeeds when `old_count == new_count` (net shift of zero can never
+    /// overflow), guarding against a harness that only pins the `Some` case
+    /// and would pass vacuously if that were broken to return `None`.
+    #[kani::proof]
+    fn shift_for_hunk_before_never_panics_and_is_exact() {
+        let current_line: u32 = kani::any();
+        let old_count: u32 = kani::any();
+        let new_count: u32 = kani::any();
+
+        let result = shift_for_hunk_before(current_line, old_count, new_count);
+
+        if old_count == new_count {
+            assert!(result == Some(current_line));
+        }
+
+        if let Some(shifted) = result {
+            let expected = i64::from(current_line) + i64::from(new_count) - i64::from(old_count);
+            assert!(i64::from(shifted) == expected);
+        }
+    }
+
+    /// `advance_hunk_line` never panics, and when it returns updated counters
+    /// they equal the inputs plus exactly the increments implied by the line
+    /// kind (Context: both +1; Deleted: old +1; Added: new +1).
+    #[kani::proof]
+    fn advance_hunk_line_never_panics_and_is_exact() {
+        let old_line: u32 = kani::any();
+        let new_line: u32 = kani::any();
+        let kind: u8 = kani::any();
+        kani::assume(kind < 3);
+        let diff_line = match kind {
+            0 => DiffLine::Context,
+            1 => DiffLine::Deleted,
+            _ => DiffLine::Added,
+        };
+
+        if let Some((new_old_line, new_new_line)) =
+            advance_hunk_line(old_line, new_line, &diff_line)
+        {
+            let (expect_old_delta, expect_new_delta): (u64, u64) = match diff_line {
+                DiffLine::Context => (1, 1),
+                DiffLine::Deleted => (1, 0),
+                DiffLine::Added => (0, 1),
+            };
+            assert!(u64::from(new_old_line) == u64::from(old_line) + expect_old_delta);
+            assert!(u64::from(new_new_line) == u64::from(new_line) + expect_new_delta);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::scm::jj::JjScmRepo;
     use crate::scm::{ScmKind, ScmRepo};
+    use proptest::prelude::*;
     use std::env;
     use std::path::{Path, PathBuf};
 
@@ -867,5 +1066,215 @@ new file mode 100644
         // if old_count == 0 { old_start - 1 } else { old_start + old_count - 1 }
         // So hunk_old_end = 5 - 1 = 4
         // This means the hunk is "before" lines >= 5, so lines at 5+ shift by +3
+    }
+
+    /// A hunk header like `@@ -4294967295,2 +1,1 @@` parses fine (`HunkHeader::parse`
+    /// accepts any `u32`), but `old_start + old_count - 1` overflows `u32` when
+    /// computing the last old-file line the hunk spans (4294967295 + 2 - 1 does not
+    /// fit). Before the fix, this panics in debug builds (and wraps in release).
+    /// `calculate_drift` must reject an unrepresentable header instead of panicking
+    /// or silently wrapping to a nonsense line number.
+    #[test]
+    fn test_calculate_drift_hunk_old_end_overflow_does_not_panic() {
+        let diff = r"diff --git a/test.rs b/test.rs
+--- a/test.rs
++++ b/test.rs
+@@ -4294967295,2 +1,1 @@
+-a
++b
+";
+        let repo = MockRepo::new(diff);
+
+        let result = calculate_drift(&repo, "test.rs", 5, "old", "new");
+
+        assert!(
+            result.is_err(),
+            "a hunk header whose old-end overflows u32 must be rejected as an error, \
+             not panic or silently wrap: got {result:?}"
+        );
+    }
+
+    /// A hunk header claiming `new_count` far larger than `old_count` relative to
+    /// `current_line` can overflow the `current_line += new_lines - old_lines` shift
+    /// for a hunk entirely before the anchor line. Must not panic or wrap.
+    #[test]
+    fn test_calculate_drift_shift_before_overflow_does_not_panic() {
+        let diff = r"diff --git a/test.rs b/test.rs
+--- a/test.rs
++++ b/test.rs
+@@ -1,1 +1,4294967295 @@
+-a
++b
+";
+        let repo = MockRepo::new(diff);
+
+        // original_line = 2 is after this hunk (old_start=1, old_count=1, so
+        // hunk_old_end=1 < 2), so the "entirely before" shift path is taken:
+        // current_line += new_count - old_count, which overflows u32.
+        let result = calculate_drift(&repo, "test.rs", 2, "old", "new");
+
+        assert!(
+            result.is_err(),
+            "a hunk shift that overflows u32 must be rejected as an error, \
+             not panic or silently wrap: got {result:?}"
+        );
+    }
+
+    /// Walking through a hunk's lines increments `old_line` on Context/Deleted
+    /// lines and `new_line` on Context/Added lines. The header's declared
+    /// `old_count`/`new_count` need not match the actual number of lines in the
+    /// hunk body (nothing cross-validates them), so a hunk whose `new_start` is
+    /// near `u32::MAX` can overflow `new_line` while walking through a run of
+    /// `Added` lines -- entirely independent of the `hunk_old_end` and
+    /// before-hunk-shift overflows covered above, and not fixed by guarding
+    /// those alone. Must not panic or wrap.
+    #[test]
+    fn test_calculate_drift_hunk_walk_overflow_does_not_panic() {
+        let diff = r"diff --git a/test.rs b/test.rs
+--- a/test.rs
++++ b/test.rs
+@@ -1,3 +4294967294,2 @@
++x
++y
+ a
+ b
+ c
+";
+        let repo = MockRepo::new(diff);
+
+        // old_start=1, old_count=3 keep hunk_old_end small (no overflow there);
+        // original_line=3 puts the target inside this hunk's old range, so the
+        // walk runs. Before it ever reaches old_line==3, the two leading Added
+        // lines push new_line (starting at 4294967294) past u32::MAX.
+        let result = calculate_drift(&repo, "test.rs", 3, "old", "new");
+
+        assert!(
+            result.is_err(),
+            "a hunk walk whose line counters overflow u32 must be rejected as an \
+             error, not panic or silently wrap: got {result:?}"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Property-based test: drift preserves content and order of surviving
+    // lines, for hand-built single-hunk diffs derived from a random edit
+    // script (keep/delete each old line, insert 0-3 fresh lines in each gap).
+    // ------------------------------------------------------------------
+
+    /// An edit script: `keep[i]` says whether old line `i+1` survives, and
+    /// `inserts[g]` is how many fresh lines are inserted in gap `g` (gap 0 is
+    /// before old line 1, gap `i+1` is right after old line `i+1`, so there
+    /// are `keep.len() + 1` gaps).
+    fn edit_script_strategy() -> impl proptest::strategy::Strategy<Value = (Vec<bool>, Vec<usize>)>
+    {
+        prop::collection::vec(proptest::bool::ANY, 1..=8).prop_flat_map(|keep| {
+            let gaps = keep.len() + 1;
+            prop::collection::vec(0usize..=3, gaps).prop_map(move |inserts| (keep.clone(), inserts))
+        })
+    }
+
+    /// Build a single-hunk unified diff from an edit script, plus the
+    /// old-file and new-file line contents it implies. Old line `i+1`'s
+    /// content is the unique string `format!("old{i}")`; each inserted line
+    /// gets a unique `format!("new{k}")`, so content identity can be checked
+    /// by simple string equality.
+    fn build_diff_from_edit_script(
+        keep: &[bool],
+        inserts: &[usize],
+    ) -> (String, Vec<String>, Vec<String>) {
+        let old_len = keep.len();
+        let old_file: Vec<String> = (1..=old_len).map(|i| format!("old{i}")).collect();
+
+        let mut body = String::new();
+        let mut new_file = Vec::new();
+        let mut new_count = 0usize;
+        let mut fresh = 0usize;
+
+        for gap in 0..=old_len {
+            for _ in 0..inserts[gap] {
+                let line = format!("new{fresh}");
+                fresh += 1;
+                body.push('+');
+                body.push_str(&line);
+                body.push('\n');
+                new_file.push(line);
+                new_count += 1;
+            }
+            if gap < old_len {
+                let content = &old_file[gap];
+                if keep[gap] {
+                    body.push(' ');
+                    body.push_str(content);
+                    body.push('\n');
+                    new_file.push(content.clone());
+                    new_count += 1;
+                } else {
+                    body.push('-');
+                    body.push_str(content);
+                    body.push('\n');
+                }
+            }
+        }
+
+        let header = format!("@@ -1,{old_len} +1,{new_count} @@\n");
+        let diff =
+            format!("diff --git a/test.rs b/test.rs\n--- a/test.rs\n+++ b/test.rs\n{header}{body}");
+
+        (diff, old_file, new_file)
+    }
+
+    proptest! {
+        /// Every line `calculate_drift` reports as `Unchanged`/`Shifted` maps to a
+        /// line whose content is identical in the new file, and surviving
+        /// (kept) lines keep their relative order (current_line strictly
+        /// increases as original_line increases among kept lines).
+        #[test]
+        fn drift_preserves_content_and_order_of_surviving_lines(
+            (keep, inserts) in edit_script_strategy()
+        ) {
+            let (diff, old_file, new_file) = build_diff_from_edit_script(&keep, &inserts);
+            let repo = MockRepo::new(&diff);
+
+            let mut prev_current_line: Option<u32> = None;
+
+            for (index, &kept) in keep.iter().enumerate() {
+                if !kept {
+                    continue;
+                }
+                let original_line = (index + 1) as u32;
+
+                let drift = calculate_drift(&repo, "test.rs", original_line, "old", "new")
+                    .expect("a hunk built from a well-formed edit script must not error");
+
+                let current_line = match drift {
+                    DriftResult::Unchanged { current_line } | DriftResult::Shifted { current_line, .. } => current_line,
+                    other => panic!(
+                        "kept line {original_line} must be Unchanged/Shifted, got {other:?}"
+                    ),
+                };
+
+                // Content identity: the reported new position holds the same
+                // content as the original line did.
+                prop_assert_eq!(
+                    &new_file[(current_line - 1) as usize],
+                    &old_file[index],
+                    "line {} drifted to {} but content differs",
+                    original_line,
+                    current_line
+                );
+
+                // Relative order of survivors is preserved.
+                if let Some(prev) = prev_current_line {
+                    prop_assert!(
+                        current_line > prev,
+                        "surviving lines must keep relative order: {} -> {} is not after previous {}",
+                        original_line,
+                        current_line,
+                        prev
+                    );
+                }
+                prev_current_line = Some(current_line);
+            }
+        }
     }
 }

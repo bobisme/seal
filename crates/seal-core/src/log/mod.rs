@@ -293,27 +293,147 @@ pub fn review_events_path(seal_root: &Path, review_id: &str) -> PathBuf {
     reviews_dir(seal_root).join(review_id).join("events.jsonl")
 }
 
+/// Why a review ID is unsafe for use in filesystem paths.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReviewIdProblem {
+    Empty,
+    PathSeparator,
+    Traversal,
+    InvalidCharacter,
+}
+
+/// Classify a review ID without building an error.
+///
+/// Works on bytes, which is equivalent to the `char` rules: every accepted
+/// byte is ASCII, and each byte of a non-ASCII `char` is >= 0x80, so it is
+/// rejected. Kept free of `anyhow` so Kani can prove it: formatting an
+/// `anyhow::Error` captures a backtrace, which CBMC cannot bound.
+fn review_id_problem(review_id: &[u8]) -> Option<ReviewIdProblem> {
+    if review_id.is_empty() {
+        return Some(ReviewIdProblem::Empty);
+    }
+    if review_id.iter().any(|&b| b == b'/' || b == b'\\') {
+        return Some(ReviewIdProblem::PathSeparator);
+    }
+    if review_id.windows(2).any(|w| w == b"..") {
+        return Some(ReviewIdProblem::Traversal);
+    }
+    if !review_id
+        .iter()
+        .all(|&b| b.is_ascii_alphanumeric() || b == b'-')
+    {
+        return Some(ReviewIdProblem::InvalidCharacter);
+    }
+    None
+}
+
 /// Validate a review ID for safe use in filesystem paths.
 ///
 /// Rejects IDs containing path separators, traversal sequences, or
 /// characters outside the expected alphanumeric-plus-dash set.
 fn validate_review_id(review_id: &str) -> Result<()> {
-    if review_id.is_empty() {
-        bail!("review ID must not be empty");
+    match review_id_problem(review_id.as_bytes()) {
+        None => Ok(()),
+        Some(ReviewIdProblem::Empty) => bail!("review ID must not be empty"),
+        Some(ReviewIdProblem::PathSeparator) => {
+            bail!("review ID must not contain path separators: {review_id}")
+        }
+        Some(ReviewIdProblem::Traversal) => bail!("review ID must not contain '..': {review_id}"),
+        Some(ReviewIdProblem::InvalidCharacter) => bail!(
+            "review ID contains invalid characters (allowed: alphanumeric, dash): {review_id}"
+        ),
     }
-    if review_id.contains('/') || review_id.contains('\\') {
-        bail!("review ID must not contain path separators: {review_id}");
+}
+
+#[cfg(kani)]
+mod proofs {
+    use super::review_id_problem;
+
+    /// An accepted ID is a single safe path component: non-empty, and every
+    /// byte is ASCII alphanumeric or '-'. That excludes '/', '\\', '.', NUL
+    /// and all non-ASCII bytes, so no join can escape the reviews directory.
+    #[kani::proof]
+    #[kani::unwind(9)]
+    fn accepted_review_id_is_one_safe_component() {
+        let bytes: [u8; 8] = kani::any();
+        let len: usize = kani::any();
+        kani::assume(len <= bytes.len());
+        let id = &bytes[..len];
+        if review_id_problem(id).is_none() {
+            assert!(!id.is_empty());
+            assert!(id.iter().all(|&b| b.is_ascii_alphanumeric() || b == b'-'));
+            assert!(std::str::from_utf8(id).is_ok());
+        }
     }
-    if review_id.contains("..") {
-        bail!("review ID must not contain '..': {review_id}");
+}
+
+/// Checks the path-level consequence that the Kani proof above leaves to
+/// `Path::join`: an accepted ID joins as exactly one `Normal` component.
+#[cfg(test)]
+mod validate_review_id_proptests {
+    use super::validate_review_id;
+    use proptest::prelude::*;
+
+    /// A mix of fully random short strings (covering arbitrary Unicode, so
+    /// the "must be pure ASCII to be accepted" assumption is exercised too)
+    /// and hand-picked adversarial/valid strings that are easy for a random
+    /// generator to miss by chance.
+    fn review_id_candidate() -> impl Strategy<Value = String> {
+        prop_oneof![
+            4 => ".{0,12}",
+            1 => Just(String::new()),
+            1 => Just("..".to_string()),
+            1 => Just("../".to_string()),
+            1 => Just("../..".to_string()),
+            1 => Just("a/b".to_string()),
+            1 => Just("a\\b".to_string()),
+            1 => Just("a..b".to_string()),
+            1 => Just("\0".to_string()),
+            1 => Just("id\0null".to_string()),
+            1 => Just("cr-001".to_string()),
+            1 => Just("simple-id".to_string()),
+        ]
     }
-    if !review_id
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '-')
-    {
-        bail!("review ID contains invalid characters (allowed: alphanumeric, dash): {review_id}");
+
+    proptest! {
+        /// If `validate_review_id` returns `Ok`, the id is non-empty, contains
+        /// none of `/`, `\`, `..`, or NUL, and joining it onto a base path
+        /// yields exactly one extra path component -- a `Normal` component
+        /// equal to the id itself (never escaping to `.`, `..`, empty, or a
+        /// root/prefix component).
+        #[test]
+        fn validate_review_id_ok_implies_safe_and_single_component(
+            s in review_id_candidate()
+        ) {
+            if validate_review_id(&s).is_ok() {
+                prop_assert!(!s.is_empty());
+                prop_assert!(!s.contains('/'));
+                prop_assert!(!s.contains('\\'));
+                prop_assert!(!s.contains(".."));
+                prop_assert!(!s.contains('\0'));
+
+                let base = std::path::Path::new("base");
+                let joined = base.join(&s);
+                let mut components = joined.components();
+
+                prop_assert_eq!(
+                    components.next(),
+                    Some(std::path::Component::Normal(std::ffi::OsStr::new("base")))
+                );
+                match components.next() {
+                    Some(std::path::Component::Normal(c)) => {
+                        prop_assert_eq!(c, std::ffi::OsStr::new(s.as_str()));
+                    }
+                    other => prop_assert!(
+                        false,
+                        "expected exactly one extra Normal component after the base, got {:?}",
+                        other
+                    ),
+                }
+                prop_assert!(components.next().is_none());
+            }
+        }
     }
-    Ok(())
 }
 
 /// Per-review event log (v2 format).
