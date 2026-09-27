@@ -194,7 +194,8 @@ pub struct CommentRow {
 /// Why the SQL reducer returns `Err` for an event.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ModelError {
-    /// `apply_review_retargeted`: old and new target commit are equal.
+    /// `apply_review_retargeted`: old and new target commit are equal and
+    /// the event moves no base.
     RetargetNoChange,
     /// `apply_review_retargeted`: `updated != 1`.
     RetargetMismatch,
@@ -262,12 +263,15 @@ impl ProjectionModel {
                 );
                 Ok(())
             }
-            // apply_review_retargeted: bail if the commits are equal; otherwise a
+            // apply_review_retargeted: bail if the commits are equal and no new
+            // base is given; otherwise a
             // guarded UPDATE (review_id, scm_anchor = old, author = envelope
             // author, status IN ('open','approved')) that must match exactly one
-            // row, then DELETE every vote of the review.
+            // row, then DELETE every vote of the review. The UPDATE sets
+            // base_commit = COALESCE(new_base_commit, base_commit): a present
+            // new base replaces the persisted one; old_base_commit is audit only.
             Event::ReviewRetargeted(e) => {
-                if e.old_target_commit == e.new_target_commit {
+                if e.old_target_commit == e.new_target_commit && e.new_base_commit.is_none() {
                     return Err(ModelError::RetargetNoChange);
                 }
                 let row = self
@@ -283,6 +287,9 @@ impl ProjectionModel {
                     StepOutcome::Updated(next) => {
                         row.set_lifecycle(next);
                         row.scm_anchor = Some(e.new_scm_anchor.clone());
+                        if let Some(base) = &e.new_base_commit {
+                            row.base_commit = Some(base.clone());
+                        }
                         row.status_changed_at = Some(ts);
                         row.status_changed_by = Some(author.to_string());
                     }
@@ -804,6 +811,9 @@ mod tests {
             new_anchor: usize,
             old_commit: usize,
             new_commit: usize,
+            /// Base move recorded on the event; `None` for a plain retarget.
+            old_base: Option<usize>,
+            new_base: Option<usize>,
         },
         Request {
             review: usize,
@@ -896,6 +906,8 @@ mod tests {
                     new_anchor,
                     old_commit,
                     new_commit,
+                    old_base,
+                    new_base,
                 } => (
                     *author,
                     Event::ReviewRetargeted(ReviewRetargeted {
@@ -904,6 +916,8 @@ mod tests {
                         new_scm_anchor: s(ANCHORS[*new_anchor]),
                         old_target_commit: s(COMMITS[*old_commit]),
                         new_target_commit: s(COMMITS[*new_commit]),
+                        old_base_commit: old_base.map(|i| s(COMMITS[i])),
+                        new_base_commit: new_base.map(|i| s(COMMITS[i])),
                     }),
                 ),
                 Self::Request {
@@ -1058,16 +1072,36 @@ mod tests {
                 kind,
                 base,
             });
-        let retarget = (r.clone(), owner, an.clone(), an, c.clone(), c.clone()).prop_map(
-            |(review, author, old_anchor, new_anchor, old_commit, new_commit)| Op::Retarget {
-                review,
-                author,
-                old_anchor,
-                new_anchor,
-                old_commit,
-                new_commit,
-            },
-        );
+        // Half of the retargets carry a base move, so the differential test
+        // covers both the kept and the replaced base.
+        let base_move = proptest::option::of((proptest::option::of(c.clone()), c.clone()));
+        let retarget = (
+            r.clone(),
+            owner,
+            an.clone(),
+            an,
+            c.clone(),
+            c.clone(),
+            base_move,
+        )
+            .prop_map(
+                |(review, author, old_anchor, new_anchor, old_commit, new_commit, base_move)| {
+                    let (old_base, new_base) = base_move
+                        .map_or((None, None), |(old_base, new_base)| {
+                            (old_base, Some(new_base))
+                        });
+                    Op::Retarget {
+                        review,
+                        author,
+                        old_anchor,
+                        new_anchor,
+                        old_commit,
+                        new_commit,
+                        old_base,
+                        new_base,
+                    }
+                },
+            );
         let request = (
             r.clone(),
             a.clone(),
@@ -1431,6 +1465,8 @@ mod tests {
                 new_anchor: 1,
                 old_commit: 0,
                 new_commit: 1,
+                old_base: None,
+                new_base: None,
             },
         ]);
         let before = snapshot(&db);

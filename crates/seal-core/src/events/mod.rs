@@ -86,6 +86,13 @@ pub struct ReviewCreated {
 ///
 /// The old and new anchors explain how each target was selected. The resolved
 /// commits make the transition stable even when a named SCM anchor later moves.
+///
+/// When the branch was rebased onto a newer trunk, the retarget also moves the
+/// exclusive range base, so the review keeps covering only the branch's own
+/// commits. `new_base_commit` is then the base the projection records;
+/// `old_base_commit` is the persisted base it replaced (absent for legacy
+/// reviews that had none). Both are absent when the base did not change, so
+/// events written before base moves existed parse and serialize unchanged.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReviewRetargeted {
     pub review_id: String,
@@ -93,6 +100,10 @@ pub struct ReviewRetargeted {
     pub new_scm_anchor: String,
     pub old_target_commit: String,
     pub new_target_commit: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub old_base_commit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new_base_commit: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -314,10 +325,15 @@ mod tests {
                 new_scm_anchor: "detached:def456".to_string(),
                 old_target_commit: "abc123".to_string(),
                 new_target_commit: "def456".to_string(),
+                old_base_commit: None,
+                new_base_commit: None,
             }),
         );
 
         let json = event.to_json_line().unwrap();
+        // A retarget without a base move serializes exactly as before the
+        // base fields existed.
+        assert!(!json.contains("base_commit"), "{json}");
         let parsed = EventEnvelope::from_json_line(&json).unwrap();
 
         match parsed.event {
@@ -327,6 +343,33 @@ mod tests {
                 assert_eq!(retargeted.new_scm_anchor, "detached:def456");
                 assert_eq!(retargeted.old_target_commit, "abc123");
                 assert_eq!(retargeted.new_target_commit, "def456");
+                assert_eq!(retargeted.old_base_commit, None);
+                assert_eq!(retargeted.new_base_commit, None);
+            }
+            _ => panic!("Expected ReviewRetargeted"),
+        }
+    }
+
+    #[test]
+    fn test_review_retargeted_base_move_roundtrip() {
+        let event = EventEnvelope::new(
+            "review-author",
+            Event::ReviewRetargeted(ReviewRetargeted {
+                review_id: "cr-abc1".to_string(),
+                old_scm_anchor: "detached:abc123".to_string(),
+                new_scm_anchor: "detached:def456".to_string(),
+                old_target_commit: "abc123".to_string(),
+                new_target_commit: "def456".to_string(),
+                old_base_commit: Some("b0".to_string()),
+                new_base_commit: Some("b1".to_string()),
+            }),
+        );
+        let json = event.to_json_line().unwrap();
+        let parsed = EventEnvelope::from_json_line(&json).unwrap();
+        match parsed.event {
+            Event::ReviewRetargeted(retargeted) => {
+                assert_eq!(retargeted.old_base_commit.as_deref(), Some("b0"));
+                assert_eq!(retargeted.new_base_commit.as_deref(), Some("b1"));
             }
             _ => panic!("Expected ReviewRetargeted"),
         }

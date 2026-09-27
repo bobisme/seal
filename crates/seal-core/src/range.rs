@@ -103,6 +103,55 @@ pub fn resolve_new_review_base(
     scm.parent_commit(target)
 }
 
+/// A persisted review base that trunk has moved past.
+///
+/// After the branch is rebased onto newer trunk (or merges trunk), the fork
+/// point descends from the persisted base, so `base..target` also holds the
+/// trunk commits in between. `seal reviews retarget` moves the base.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StaleBase {
+    /// The persisted base the range uses now.
+    pub persisted: String,
+    /// The fork point discovered for the current target.
+    pub discovered: String,
+}
+
+impl StaleBase {
+    /// One-line warning with the command that fixes the range.
+    #[must_use]
+    pub fn warning(&self, review_id: &str) -> String {
+        format!(
+            "review base {} is behind the branch fork point {}; the range includes trunk commits. To fix: seal reviews retarget {review_id}",
+            self.persisted, self.discovered
+        )
+    }
+}
+
+/// Detect a persisted base that trunk has moved past.
+///
+/// Returns `Some` only for an open or approved review whose range uses its
+/// persisted base, when the base discovered for the current target differs
+/// from the persisted base and descends from it. Any failure to discover or
+/// compare returns `None`: this is a warning, never a read failure.
+#[must_use]
+pub fn detect_stale_base(
+    scm: &dyn ScmRepo,
+    review: &ReviewDetail,
+    range: &ReviewRange,
+) -> Option<StaleBase> {
+    if !range.base_is_persisted || !matches!(review.status.as_str(), "open" | "approved") {
+        return None;
+    }
+    let discovered = scm.discover_base_commit(&range.target).ok()??;
+    if discovered == range.base || !scm.is_ancestor(&range.base, &discovered).ok()? {
+        return None;
+    }
+    Some(StaleBase {
+        persisted: range.base.clone(),
+        discovered,
+    })
+}
+
 /// Why an approval no longer covers the code.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StaleReason {

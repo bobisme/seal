@@ -156,6 +156,8 @@ mod tests {
                 new_scm_anchor: "refs/heads/v2".to_string(),
                 old_target_commit: "c1".to_string(),
                 new_target_commit: "c2".to_string(),
+                old_base_commit: None,
+                new_base_commit: None,
             }),
         );
         append(
@@ -305,6 +307,8 @@ mod tests {
                 new_scm_anchor: "refs/heads/v2".to_string(),
                 old_target_commit: "c1".to_string(),
                 new_target_commit: "c2".to_string(),
+                old_base_commit: None,
+                new_base_commit: None,
             }),
         );
         append(
@@ -484,6 +488,8 @@ mod tests {
                 new_scm_anchor: "refs/heads/v3".to_string(),
                 old_target_commit: "c2".to_string(),
                 new_target_commit: "c3".to_string(),
+                old_base_commit: None,
+                new_base_commit: None,
             }),
         );
 

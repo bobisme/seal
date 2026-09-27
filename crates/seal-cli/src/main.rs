@@ -162,12 +162,13 @@ fn main() -> Result<()> {
                     format,
                 )?;
             }
-            ReviewsCommands::Retarget { review_id } => {
+            ReviewsCommands::Retarget { review_id, base } => {
                 let scm = resolve_backend(&workspace_root, scm_preference)?;
                 run_reviews_retarget(
                     &seal_root,
                     scm.as_ref(),
                     &review_id,
+                    base.as_deref(),
                     identity.as_deref(),
                     format,
                 )?;

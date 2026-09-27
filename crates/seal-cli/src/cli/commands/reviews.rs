@@ -349,15 +349,16 @@ pub fn run_reviews_retarget(
     repo_root: &Path,
     scm: &dyn ScmRepo,
     review_id: &str,
+    base: Option<&str>,
     author: Option<&str>,
     format: OutputFormat,
 ) -> Result<()> {
     ensure_initialized(repo_root)?;
 
     let services = open_services(repo_root)?;
-    let retargeted = services.reviews().retarget(scm, review_id, author)?;
+    let retargeted = services.reviews().retarget(scm, review_id, author, base)?;
 
-    let result = serde_json::json!({
+    let mut result = serde_json::json!({
         "review_id": retargeted.review_id,
         "status": "open",
         "old_scm_anchor": retargeted.old_scm_anchor,
@@ -366,11 +367,25 @@ pub fn run_reviews_retarget(
         "target_commit": retargeted.new_target_commit,
         "approval_reset": retargeted.approval_reset,
         "cleared_votes": retargeted.cleared_votes,
+        "base_commit": retargeted.new_base_commit,
+        "base_changed": retargeted.base_changed,
         "next_steps": [
             format!("seal reviews request {review_id} --reviewers <name>"),
             format!("Ask each reviewer to inspect the new target and run 'seal lgtm {review_id}'"),
         ],
     });
+    if retargeted.base_changed {
+        if let Some(object) = result.as_object_mut() {
+            object.insert(
+                "old_base_commit".to_string(),
+                serde_json::json!(retargeted.old_base_commit),
+            );
+            object.insert(
+                "new_base_commit".to_string(),
+                serde_json::json!(retargeted.new_base_commit),
+            );
+        }
+    }
 
     let formatter = Formatter::new(format);
     formatter.print(&result)?;

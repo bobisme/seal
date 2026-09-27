@@ -331,9 +331,16 @@ pub enum ReviewsCommands {
     },
 
     /// Move a review to the current workspace target and require fresh votes
+    ///
+    /// After a rebase onto newer trunk, the range base moves to the new fork
+    /// point, so the review keeps covering only the branch's own commits.
     Retarget {
         /// Review ID
         review_id: String,
+
+        /// Use this revision as the new range base instead of discovering it
+        #[arg(long)]
+        base: Option<String>,
     },
 
     /// Approve a review

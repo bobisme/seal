@@ -157,6 +157,10 @@ pub fn resolve_seal_root_from_path(path: &Path) -> Result<PathBuf> {
     }
 }
 
+/// Local bookmarks that name the trunk, for base discovery.
+const LOCAL_TRUNK_BOOKMARKS: &str =
+    r#"bookmarks(exact:"main") | bookmarks(exact:"master") | bookmarks(exact:"trunk")"#;
+
 /// Wrapper for executing jj commands against a repository.
 #[derive(Debug, Clone)]
 pub struct JjRepo {
@@ -445,8 +449,25 @@ impl JjRepo {
     /// Never returns an error. The signature matches the SCM trait, where
     /// other backends can fail.
     pub fn find_immutable_base(&self, target: &str) -> Result<Option<String>> {
-        let revset = format!("heads(::{target} & (immutable() ~ root()))");
-        let Ok(output) = self.run_jj(&["log", "-r", &revset, "--no-graph", "-T", "commit_id"])
+        // `immutable()` follows `trunk()`, which is the REMOTE trunk bookmark.
+        // Local trunk commits that are not pushed yet are trunk too, so the
+        // history of the local main/master/trunk bookmarks counts as base
+        // material. Otherwise a lagging main@origin makes the range include
+        // the unpushed trunk commits.
+        //
+        // heads() of an ancestor set of `target` usually has one member. When
+        // it has several (unrelated trunk sides of a merge), `latest()` picks
+        // one deterministically by committer date.
+        let with_local_trunk = format!(
+            "latest(heads(::{target} & ((immutable() | ::({LOCAL_TRUNK_BOOKMARKS})) ~ root())))"
+        );
+        let immutable_only = format!("latest(heads(::{target} & (immutable() ~ root())))");
+        let Some(output) = [with_local_trunk, immutable_only]
+            .iter()
+            .find_map(|revset| {
+                self.run_jj(&["log", "-r", revset, "--no-graph", "-T", "commit_id"])
+                    .ok()
+            })
         else {
             // Older jj versions have no immutable() revset function.
             return Ok(None);
@@ -674,6 +695,127 @@ mod tests {
             repo.count_commits_between(&approved, &new_target)
                 .expect("count"),
             1
+        );
+    }
+
+    /// Unpushed local trunk commits are trunk. With no remote, `immutable()`
+    /// is only the root, so before local trunk bookmarks counted, discovery
+    /// found nothing (and with a lagging main@origin it found a stale base).
+    #[test]
+    fn test_jj_discovery_uses_local_trunk_bookmark() {
+        if which::which("jj").is_err() {
+            return;
+        }
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().to_path_buf();
+        let run = |args: &[&str]| {
+            let status = Command::new("jj")
+                .current_dir(&path)
+                .arg("--color=never")
+                .args(args)
+                .status()
+                .expect("failed to run jj");
+            assert!(status.success(), "jj command failed: {args:?}");
+        };
+        run(&["git", "init"]);
+        run(&["config", "set", "--repo", "user.name", "Test User"]);
+        run(&["config", "set", "--repo", "user.email", "test@example.com"]);
+        for name in ["trunk1", "trunk2"] {
+            std::fs::write(path.join(name), "t\n").expect("write");
+            run(&["commit", "-m", name]);
+        }
+        run(&["bookmark", "create", "main", "-r", "@-"]);
+        for name in ["f1", "f2", "f3"] {
+            std::fs::write(path.join(name), "f\n").expect("write");
+            run(&["commit", "-m", name]);
+        }
+        let repo = JjRepo::new(&path);
+        let main = repo.get_commit_for_rev("main").expect("main");
+        let target = repo.get_commit_for_rev("@-").expect("target");
+        let base = repo
+            .find_immutable_base(&target)
+            .expect("discover")
+            .expect("a base");
+        assert_eq!(base, main);
+        assert_eq!(
+            repo.count_commits_between(&base, &target).expect("count"),
+            3
+        );
+        std::mem::forget(dir);
+    }
+
+    /// The jj analogue of a `push -u` upstream: a pushed feature bookmark is
+    /// tracked, so `feature@origin` is mutable and not in `immutable()`, and
+    /// the local-trunk revset names only main/master/trunk. Discovery must
+    /// keep the fork from main, not the pushed feature tip.
+    #[test]
+    fn test_jj_discovery_ignores_pushed_feature_bookmark() {
+        if which::which("jj").is_err() {
+            return;
+        }
+        let dir = tempfile::tempdir().expect("tempdir");
+        let origin = dir.path().join("origin.git");
+        let path = dir.path().join("work");
+        std::fs::create_dir(&path).expect("mkdir");
+        let status = Command::new("git")
+            .args(["init", "-q", "--bare"])
+            .arg(&origin)
+            .status()
+            .expect("git init");
+        assert!(status.success());
+        let run = |args: &[&str]| {
+            let output = Command::new("jj")
+                .current_dir(&path)
+                .args([
+                    "--color=never",
+                    "--config",
+                    "user.name=T",
+                    "--config",
+                    "user.email=t@e",
+                ])
+                .args(args)
+                .output()
+                .expect("failed to run jj");
+            assert!(
+                output.status.success(),
+                "jj {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        run(&["git", "init"]);
+        run(&[
+            "git",
+            "remote",
+            "add",
+            "origin",
+            origin.to_str().expect("utf8"),
+        ]);
+        std::fs::write(path.join("trunk"), "t\n").expect("write");
+        run(&["commit", "-m", "trunk"]);
+        run(&["bookmark", "create", "main", "-r", "@-"]);
+        run(&["git", "push", "--bookmark", "main"]);
+        for name in ["f1", "f2", "f3"] {
+            std::fs::write(path.join(name), "f\n").expect("write");
+            run(&["commit", "-m", name]);
+        }
+        run(&["bookmark", "create", "feature", "-r", "@-"]);
+        run(&["git", "push", "--bookmark", "feature"]);
+        std::fs::write(path.join("f4"), "f\n").expect("write");
+        run(&["commit", "-m", "f4"]);
+
+        let repo = JjRepo::new(&path);
+        let main = repo.get_commit_for_rev("main").expect("main");
+        let pushed = repo.get_commit_for_rev("feature@origin").expect("pushed");
+        let target = repo.get_commit_for_rev("@-").expect("target");
+        assert_ne!(pushed, main);
+        let base = repo
+            .find_immutable_base(&target)
+            .expect("discover")
+            .expect("a base");
+        assert_eq!(base, main);
+        assert_eq!(
+            repo.count_commits_between(&base, &target).expect("count"),
+            4
         );
     }
 

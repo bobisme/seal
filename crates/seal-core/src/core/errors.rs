@@ -63,6 +63,16 @@ pub enum CoreError {
         reason: String,
     },
 
+    /// The explicit `--base` given to a retarget does not resolve.
+    #[error(
+        "Cannot retarget {review_id}: failed to resolve --base {base}: {reason}\n  To fix: pass a revision this repository knows, such as a commit hash, a branch name, or main."
+    )]
+    RetargetBaseUnresolved {
+        review_id: String,
+        base: String,
+        reason: String,
+    },
+
     /// The proposed target is already the effective review target.
     #[error(
         "Review {review_id} already targets commit {target_commit}.\n  To fix: commit the new work, then run 'seal reviews retarget {review_id}' again."
@@ -74,7 +84,7 @@ pub enum CoreError {
 
     /// The proposed target does not preserve the review's existing range.
     #[error(
-        "Cannot retarget {review_id}: commit {target_commit} does not descend from review base {base_commit}.\n  To fix: switch to the review's feature history, or create a new review with the correct --base."
+        "Cannot retarget {review_id}: commit {target_commit} does not descend from review base {base_commit}.\n  To fix: switch to the review's feature history, or pass the fork point with 'seal reviews retarget {review_id} --base <rev>'."
     )]
     InvalidRetargetRange {
         review_id: String,

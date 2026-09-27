@@ -8,7 +8,7 @@ use crate::cli::commands::helpers::{ensure_initialized, open_services, review_no
 use crate::output::{Formatter, OutputFormat};
 use seal_core::jj::drift::{calculate_drift, DriftResult};
 use seal_core::projection::ThreadSummary;
-use seal_core::range::{approval_coverage, resolve_review_range};
+use seal_core::range::{approval_coverage, detect_stale_base, resolve_review_range};
 use seal_core::scm::{git_diff_changed_paths, ScmRepo};
 use seal_core::sealignore::{AllFilesIgnoredError, SealIgnore};
 
@@ -204,6 +204,9 @@ pub fn run_diff(
     //   multi-commit feature stay in the diff. Reviews created before ranges
     //   were supported fall back to the parent of the target.
     let range = resolve_review_range(scm, &review);
+    // Warn when a rebase left the persisted base behind the fork point, so
+    // the range also holds trunk commits.
+    let stale_base = detect_stale_base(scm, &review, &range);
     let target_commit = range.target;
     let base_commit = range.base;
 
@@ -245,6 +248,8 @@ pub fn run_diff(
         "review_id": review_id,
         "base_commit": base_commit,
         "base_is_persisted": range.base_is_persisted,
+        "base_warning": stale_base.as_ref().map(|stale| stale.warning(review_id)),
+        "suggested_base": stale_base.as_ref().map(|stale| stale.discovered.clone()),
         "approval_stale": coverage.as_ref().map(seal_core::range::ApprovalCoverage::is_stale),
         "approved_commit": coverage.as_ref().and_then(|c| c.approved_commit.clone()),
         "uncovered_commits": coverage.as_ref().and_then(|c| c.uncovered_commits),

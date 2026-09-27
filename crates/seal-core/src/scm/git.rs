@@ -63,29 +63,31 @@ impl GitRepo {
         }
     }
 
-    /// Return the configured upstream of the current branch, if it has one.
+    /// Return the configured upstream of the current branch when it can mark
+    /// a trunk, as a full ref name.
+    ///
+    /// An upstream that is the branch's own remote copy (`git push -u origin
+    /// feature` makes `origin/feature` the upstream of `feature`) is not
+    /// trunk. Its merge base is the pushed tip, the nearest of all candidates,
+    /// so accepting it would drop every pushed feature commit from the range.
     fn maybe_upstream_ref(&self) -> Option<String> {
-        let output = Command::new("git")
-            .current_dir(&self.root)
-            .args([
-                "rev-parse",
-                "--abbrev-ref",
-                "--symbolic-full-name",
-                "@{upstream}",
+        let head = self.maybe_symbolic_ref_head()?;
+        let output = self
+            .run_git(&[
+                "for-each-ref",
+                "--format=%(upstream)%00%(upstream:remoteref)",
+                "--end-of-options",
+                &head,
             ])
-            .output()
             .ok()?;
-
-        if !output.status.success() {
+        let line = output.lines().next()?;
+        let mut fields = line.split('\0');
+        let upstream = fields.next()?.trim();
+        let remote_ref = fields.next().unwrap_or_default();
+        if upstream.is_empty() || is_own_remote_copy(&head, remote_ref) {
             return None;
         }
-
-        let value = String::from_utf8(output.stdout).ok()?.trim().to_string();
-        if value.is_empty() {
-            None
-        } else {
-            Some(value)
-        }
+        Some(upstream.to_string())
     }
 
     /// Return the merge base of `candidate` and `target`, if both resolve.
@@ -331,6 +333,13 @@ impl ScmRepo for GitRepo {
             .into_iter()
             .chain(GIT_BASE_CANDIDATES.iter().map(|c| (*c).to_string()));
 
+        // Every candidate that resolves gives a merge base with the target.
+        // All of them are ancestors of the target, so the nearest one bounds
+        // the smallest range that still excludes every trunk commit. Taking
+        // the first candidate instead picks a stale base whenever that ref
+        // lags another: origin/main behind unpushed local main makes a new
+        // review cover the unpushed trunk commits too.
+        let mut bases = Vec::new();
         for candidate in candidates {
             let Some(base) = self.maybe_merge_base(&candidate, &target_commit) else {
                 continue;
@@ -343,11 +352,42 @@ impl ScmRepo for GitRepo {
                 continue;
             }
 
-            return Ok(Some(base));
+            bases.push(base);
         }
 
-        Ok(None)
+        Ok(nearest_base(bases, |ancestor, descendant| {
+            self.is_ancestor(ancestor, descendant).unwrap_or(false)
+        }))
     }
+}
+
+/// True when an upstream whose ref on its remote is `remote_ref` is the
+/// remote copy of the branch `head_ref` itself (same branch name), rather
+/// than another branch such as `main`.
+fn is_own_remote_copy(head_ref: &str, remote_ref: &str) -> bool {
+    remote_ref == head_ref
+}
+
+/// Pick the merge base nearest the target from `bases`, in priority order.
+///
+/// The result replaces the current pick only with a strict descendant of it.
+/// When the bases are totally ordered by ancestry (the usual case: every trunk
+/// ref is a copy of the same line of history at a different age), this is the
+/// base that descends from all the others. When two bases are unrelated (both
+/// sides of a merge), the earlier candidate wins against the later one, so the
+/// result is deterministic and follows the candidate priority order.
+pub(crate) fn nearest_base<T: PartialEq>(
+    bases: impl IntoIterator<Item = T>,
+    is_ancestor: impl Fn(&T, &T) -> bool,
+) -> Option<T> {
+    let mut best: Option<T> = None;
+    for base in bases {
+        best = match best {
+            Some(current) if current == base || !is_ancestor(&current, &base) => Some(current),
+            _ => Some(base),
+        };
+    }
+    best
 }
 
 #[cfg(test)]
@@ -565,5 +605,59 @@ mod tests {
 
         let target = repo.current_commit().expect("target");
         assert_eq!(repo.discover_base_commit(&target).expect("discover"), None);
+    }
+
+    /// Seen in seal itself (bn-jnp9): origin/main lagged local main by
+    /// unpushed commits, and discovery took origin/HEAD first, so a new review
+    /// covered the unpushed trunk commits too. The nearest merge base wins.
+    #[test]
+    fn test_discover_base_prefers_local_main_over_lagging_origin() {
+        let path = setup_git_repo();
+        run_git_at(&path, &["branch", "-M", "main"]);
+        let repo = GitRepo::new(path.clone());
+        let pushed = repo.current_commit().expect("pushed");
+        for name in ["unpushed1", "unpushed2"] {
+            std::fs::write(path.join(name), "u\n").expect("write");
+            run_git_at(&path, &["add", name]);
+            run_git_at(&path, &["commit", "-m", name]);
+        }
+        let local_main = repo.current_commit().expect("local main");
+        run_git_at(&path, &["update-ref", "refs/remotes/origin/main", &pushed]);
+        run_git_at(
+            &path,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/main",
+            ],
+        );
+
+        run_git_at(&path, &["checkout", "-q", "--detach"]);
+        std::fs::write(path.join("work.txt"), "w\n").expect("write");
+        run_git_at(&path, &["add", "work.txt"]);
+        run_git_at(&path, &["commit", "-m", "work"]);
+        let target = repo.current_commit().expect("target");
+
+        let base = repo
+            .discover_base_commit(&target)
+            .expect("discover")
+            .expect("a base");
+        assert_eq!(base, local_main);
+        assert_eq!(
+            repo.count_commits_between(&base, &target).expect("count"),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn test_nearest_base_picks_descendant_else_first() {
+        // Total order by `<=`: the greatest element wins, in any order.
+        let le = |a: &u32, b: &u32| a <= b;
+        assert_eq!(nearest_base([1, 3, 2], le), Some(3));
+        assert_eq!(nearest_base([3, 1, 2], le), Some(3));
+        assert_eq!(nearest_base(Vec::<u32>::new(), le), None);
+        // Unrelated bases: the earlier candidate keeps priority.
+        let unrelated = |a: &u32, b: &u32| a == b;
+        assert_eq!(nearest_base([7, 5], unrelated), Some(7));
     }
 }

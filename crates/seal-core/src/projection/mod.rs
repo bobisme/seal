@@ -1670,16 +1670,22 @@ fn apply_review_retargeted(
     author: &str,
     ts: &DateTime<Utc>,
 ) -> Result<()> {
-    if event.old_target_commit == event.new_target_commit {
+    // Same target is valid only when the base moves: a branch anchor already
+    // follows a rebase, so only its base needs the event.
+    if event.old_target_commit == event.new_target_commit && event.new_base_commit.is_none() {
         anyhow::bail!(
             "ReviewRetargeted for {} does not change the resolved target commit",
             event.review_id
         );
     }
 
+    // A retarget after a rebase also moves the range base. Without
+    // `new_base_commit` the persisted base is kept, which is how every retarget
+    // written before base moves existed replays.
     let updated = conn.execute(
         "UPDATE reviews SET
             scm_anchor = ?,
+            base_commit = COALESCE(?, base_commit),
             status = 'open',
             approved_commit = NULL,
             status_changed_at = ?,
@@ -1690,6 +1696,7 @@ fn apply_review_retargeted(
           AND status IN ('open', 'approved')",
         params![
             event.new_scm_anchor,
+            event.new_base_commit,
             ts.to_rfc3339(),
             author,
             event.review_id,
@@ -3082,6 +3089,8 @@ mod tests {
                     new_scm_anchor: "change456".to_string(),
                     old_target_commit: "commit456".to_string(),
                     new_target_commit: "commit789".to_string(),
+                    old_base_commit: None,
+                    new_base_commit: None,
                 }),
             ),
         )
@@ -3093,6 +3102,48 @@ mod tests {
         assert_eq!(review.approved_commit, None);
         assert!(review.votes.is_empty());
         assert_eq!(review.status_changed_by.as_deref(), Some("test_author"));
+    }
+
+    #[test]
+    fn test_retarget_moves_base_only_when_event_carries_one() {
+        let db = ProjectionDb::open_in_memory().unwrap();
+        db.init_schema().unwrap();
+        let mut created = make_review_created("cr-001");
+        if let Event::ReviewCreated(ref mut e) = created.event {
+            e.base_commit = Some("base0".to_string());
+        }
+        apply_event(&db, &created).unwrap();
+
+        let retarget =
+            |old_anchor: &str, new_anchor: &str, old: &str, new: &str, base: Option<&str>| {
+                EventEnvelope::new(
+                    "test_author",
+                    Event::ReviewRetargeted(ReviewRetargeted {
+                        review_id: "cr-001".to_string(),
+                        old_scm_anchor: old_anchor.to_string(),
+                        new_scm_anchor: new_anchor.to_string(),
+                        old_target_commit: old.to_string(),
+                        new_target_commit: new.to_string(),
+                        old_base_commit: base.map(|_| "base0".to_string()),
+                        new_base_commit: base.map(ToString::to_string),
+                    }),
+                )
+            };
+
+        // No base change: the persisted base stays.
+        apply_event(&db, &retarget("change123", "change456", "c1", "c2", None)).unwrap();
+        let review = db.get_review("cr-001").unwrap().unwrap();
+        assert_eq!(review.base_commit.as_deref(), Some("base0"));
+
+        // A base change moves it.
+        apply_event(
+            &db,
+            &retarget("change456", "change789", "c2", "c3", Some("base1")),
+        )
+        .unwrap();
+        let review = db.get_review("cr-001").unwrap().unwrap();
+        assert_eq!(review.base_commit.as_deref(), Some("base1"));
+        assert_eq!(review.scm_anchor, "change789");
     }
 
     /// Same as eval data test but with trailing empty line (as found in eval).
