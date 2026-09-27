@@ -195,7 +195,16 @@ impl<'a> ReviewService<'a> {
     ///   moves to it and the range again holds only the branch's own commits.
     ///   Any other outcome (nothing discovered, same base, an older or
     ///   unrelated base) keeps the persisted base.
-    /// - Legacy reviews without a base keep none.
+    /// - Legacy reviews (created before ranges existed, `base_commit` is
+    ///   `None`) instead try `discover_base_commit(new_target)` directly. When
+    ///   it finds a base that is an ancestor of the new target, the review
+    ///   adopts it: the event records `new_base_commit` (`old_base_commit`
+    ///   stays `None`, since there was nothing persisted to replace) and the
+    ///   review becomes a normal ranged review from then on. Otherwise —
+    ///   nothing discovered, or a discovered base that is not an ancestor of
+    ///   the new target — the review keeps having no base, and the old target
+    ///   is used as the range base for this retarget's validation, exactly as
+    ///   before.
     pub fn retarget(
         &self,
         scm: &dyn ScmRepo,
@@ -273,7 +282,7 @@ impl<'a> ReviewService<'a> {
             })?),
             None => match persisted_base.as_deref() {
                 Some(persisted) => Some(rederive_base(scm, persisted, &new_target_commit)?),
-                None => None,
+                None => discover_legacy_base(scm, &new_target_commit)?,
             },
         };
         let base_changed = chosen_base.is_some() && chosen_base != persisted_base;
@@ -512,14 +521,176 @@ fn rederive_base(scm: &dyn ScmRepo, persisted: &str, target: &str) -> CoreResult
     Ok(persisted.to_string())
 }
 
+/// Discover a range base for a legacy review (created before ranges existed,
+/// so `base_commit` is `None`) that has neither a persisted base nor an
+/// explicit `--base`.
+///
+/// Returns the discovered base only when `discover_base_commit` finds one
+/// *and* it is an ancestor of `target`. `discover_base_commit` already
+/// returns merge bases with `target`, which are ancestors of it by
+/// construction, so the ancestor check should never actually reject a
+/// discovered base — it exists so a surprising SCM answer falls back to
+/// today's behaviour (no base, old target used for validation) instead of
+/// propagating a base that would fail `is_ancestor` in the caller and turn
+/// into a confusing `InvalidRetargetRange`.
+///
+/// Returns `None` when nothing is discovered, leaving the review exactly as
+/// legacy retargets have always behaved: no base is recorded, and the old
+/// target commit stands in for the base when the caller checks that the new
+/// target still contains the reviewed range.
+fn discover_legacy_base(scm: &dyn ScmRepo, target: &str) -> CoreResult<Option<String>> {
+    let Ok(Some(discovered)) = scm.discover_base_commit(target) else {
+        return Ok(None);
+    };
+    if scm
+        .is_ancestor(&discovered, target)
+        .map_err(CoreError::Internal)?
+    {
+        return Ok(Some(discovered));
+    }
+    Ok(None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::log::{open_or_create_review, AppendLog};
     use crate::scm::git::GitRepo;
+    use crate::scm::ScmKind;
     use std::path::Path;
     use std::process::Command;
     use tempfile::{tempdir, TempDir};
+
+    /// A minimal `ScmRepo` whose `discover_base_commit` returns a fixed
+    /// answer and whose `is_ancestor` uses the trait's default (`Ok(false)`).
+    /// No real backend can produce a discovered base that fails the ancestor
+    /// check (a merge base is an ancestor of the target by construction), so
+    /// this fake is what makes `discover_legacy_base`'s defensive check
+    /// reachable at all.
+    struct FakeDiscoveryScm {
+        discovered: Option<String>,
+    }
+
+    impl ScmRepo for FakeDiscoveryScm {
+        fn kind(&self) -> ScmKind {
+            ScmKind::Git
+        }
+
+        fn root(&self) -> &Path {
+            Path::new(".")
+        }
+
+        fn current_anchor(&self) -> anyhow::Result<String> {
+            unimplemented!("not used by discover_legacy_base")
+        }
+
+        fn current_commit(&self) -> anyhow::Result<String> {
+            unimplemented!("not used by discover_legacy_base")
+        }
+
+        fn commit_for_anchor(&self, _anchor: &str) -> anyhow::Result<String> {
+            unimplemented!("not used by discover_legacy_base")
+        }
+
+        fn parent_commit(&self, _commit: &str) -> anyhow::Result<String> {
+            unimplemented!("not used by discover_legacy_base")
+        }
+
+        fn diff_git(&self, _from: &str, _to: &str) -> anyhow::Result<String> {
+            unimplemented!("not used by discover_legacy_base")
+        }
+
+        fn diff_git_file(&self, _from: &str, _to: &str, _file: &str) -> anyhow::Result<String> {
+            unimplemented!("not used by discover_legacy_base")
+        }
+
+        fn changed_files_between(&self, _from: &str, _to: &str) -> anyhow::Result<Vec<String>> {
+            unimplemented!("not used by discover_legacy_base")
+        }
+
+        fn file_exists(&self, _rev: &str, _path: &str) -> anyhow::Result<bool> {
+            unimplemented!("not used by discover_legacy_base")
+        }
+
+        fn show_file(&self, _rev: &str, _path: &str) -> anyhow::Result<String> {
+            unimplemented!("not used by discover_legacy_base")
+        }
+
+        fn discover_base_commit(&self, _target: &str) -> anyhow::Result<Option<String>> {
+            Ok(self.discovered.clone())
+        }
+    }
+
+    /// A discovered base that the SCM cannot vouch is an ancestor of the
+    /// target must not be adopted: `discover_legacy_base` falls back to
+    /// `None` (today's legacy behaviour) rather than handing the caller a
+    /// base that could turn a later `is_ancestor` check into a confusing
+    /// `InvalidRetargetRange`, or worse, silently narrow the reviewed range.
+    #[test]
+    fn discover_legacy_base_rejects_a_discovered_base_that_is_not_an_ancestor() {
+        let scm = FakeDiscoveryScm {
+            discovered: Some("deadbeef".to_string()),
+        };
+        // FakeDiscoveryScm does not override `is_ancestor`, so the trait
+        // default (`Ok(false)`) applies: the discovered base is reported as
+        // not an ancestor of the target.
+        let result = discover_legacy_base(&scm, "cafebabe").expect("no scm error");
+        assert_eq!(result, None);
+    }
+
+    /// The mirror case: when the discovered base *is* an ancestor, it is
+    /// adopted.
+    #[test]
+    fn discover_legacy_base_adopts_a_discovered_base_that_is_an_ancestor() {
+        struct AlwaysAncestor(FakeDiscoveryScm);
+        impl ScmRepo for AlwaysAncestor {
+            fn kind(&self) -> ScmKind {
+                self.0.kind()
+            }
+            fn root(&self) -> &Path {
+                self.0.root()
+            }
+            fn current_anchor(&self) -> anyhow::Result<String> {
+                self.0.current_anchor()
+            }
+            fn current_commit(&self) -> anyhow::Result<String> {
+                self.0.current_commit()
+            }
+            fn commit_for_anchor(&self, anchor: &str) -> anyhow::Result<String> {
+                self.0.commit_for_anchor(anchor)
+            }
+            fn parent_commit(&self, commit: &str) -> anyhow::Result<String> {
+                self.0.parent_commit(commit)
+            }
+            fn diff_git(&self, from: &str, to: &str) -> anyhow::Result<String> {
+                self.0.diff_git(from, to)
+            }
+            fn diff_git_file(&self, from: &str, to: &str, file: &str) -> anyhow::Result<String> {
+                self.0.diff_git_file(from, to, file)
+            }
+            fn changed_files_between(&self, from: &str, to: &str) -> anyhow::Result<Vec<String>> {
+                self.0.changed_files_between(from, to)
+            }
+            fn file_exists(&self, rev: &str, path: &str) -> anyhow::Result<bool> {
+                self.0.file_exists(rev, path)
+            }
+            fn show_file(&self, rev: &str, path: &str) -> anyhow::Result<String> {
+                self.0.show_file(rev, path)
+            }
+            fn discover_base_commit(&self, target: &str) -> anyhow::Result<Option<String>> {
+                self.0.discover_base_commit(target)
+            }
+            fn is_ancestor(&self, _ancestor: &str, _descendant: &str) -> anyhow::Result<bool> {
+                Ok(true)
+            }
+        }
+
+        let scm = AlwaysAncestor(FakeDiscoveryScm {
+            discovered: Some("deadbeef".to_string()),
+        });
+        let result = discover_legacy_base(&scm, "cafebabe").expect("no scm error");
+        assert_eq!(result, Some("deadbeef".to_string()));
+    }
 
     fn run_git(repo: &Path, args: &[&str]) {
         let output = Command::new("git")
@@ -876,6 +1047,31 @@ mod tests {
             create_review(&self.ctx, &self.scm, base)
         }
 
+        /// A review created before ranges existed: `base_commit` is `None`,
+        /// bypassing `ReviewService::create` (which always resolves a base
+        /// today) by appending the `ReviewCreated` event directly.
+        fn create_legacy_review(&self) -> String {
+            let review_id = new_review_id();
+            let anchor = self.scm.current_anchor().expect("anchor");
+            let commit = self.scm.current_commit().expect("commit");
+            let event = EventEnvelope::new(
+                "alice",
+                Event::ReviewCreated(ReviewCreated {
+                    review_id: review_id.clone(),
+                    jj_change_id: anchor.clone(),
+                    scm_kind: Some("git".to_string()),
+                    scm_anchor: Some(anchor),
+                    initial_commit: commit,
+                    base_commit: None,
+                    title: "Legacy review".to_string(),
+                    description: None,
+                }),
+            );
+            let log = open_or_create_review(self.ctx.seal_root(), &review_id).expect("review log");
+            log.append(&event).expect("append review created");
+            review_id
+        }
+
         fn retarget(&self, id: &str, base: Option<&str>) -> CoreResult<RetargetResult> {
             self.ctx.services().expect("services").reviews().retarget(
                 &self.scm,
@@ -1230,6 +1426,139 @@ mod tests {
             ws.scm.discover_base_commit(&target).expect("discover"),
             Some(pushed)
         );
+    }
+
+    // ------------------------------------------------------------------
+    // bn-2r6t: retarget derives a base for a legacy review after a rebase
+    // ------------------------------------------------------------------
+
+    impl Workspace {
+        /// Remove the local trunk branch, leaving `discover_base_commit` with
+        /// no candidate to resolve (no `refs/heads/main`, no upstream).
+        fn drop_trunk(&self) {
+            run_git(self.root(), &["branch", "-D", "main"]);
+        }
+    }
+
+    /// Acceptance for bn-2r6t: a legacy review (no persisted base) survives a
+    /// rebase because retarget now discovers a base for it, exactly as a
+    /// ranged review already does.
+    #[test]
+    fn legacy_review_retarget_after_rebase_discovers_base_and_becomes_ranged() {
+        let mut ws = Workspace::new();
+        for _ in 0..2 {
+            ws.branch_commit();
+        }
+        let id = ws.create_legacy_review();
+        assert_eq!(ws.review(&id).base_commit, None);
+        let old_target = ws.scm.current_commit().expect("old target");
+
+        ws.trunk_commit();
+        ws.rebase_onto_trunk();
+        let new_target = ws.scm.current_commit().expect("new target");
+        assert_ne!(old_target, new_target);
+        let trunk = ws.scm.commit_for_anchor("refs/heads/main").expect("main");
+
+        let result = ws.retarget(&id, None).expect("retarget");
+        assert!(result.base_changed);
+        assert_eq!(result.old_base_commit, None);
+        assert_eq!(result.new_base_commit.as_deref(), Some(trunk.as_str()));
+        assert_eq!(result.new_target_commit, new_target);
+
+        let review = ws.review(&id);
+        assert_eq!(review.base_commit.as_deref(), Some(trunk.as_str()));
+        let range = ws.range(&id);
+        assert_eq!(range.target, new_target);
+        assert_eq!(
+            ws.scm
+                .count_commits_between(&range.base, &range.target)
+                .unwrap(),
+            Some(2)
+        );
+        assert_eq!(
+            subjects(ws.root(), &range.base, &range.target),
+            ws.branch_subjects()
+        );
+
+        let retargeted = last_retarget(&ws.events(&id));
+        assert_eq!(retargeted.old_base_commit, None);
+        assert_eq!(retargeted.new_base_commit.as_deref(), Some(trunk.as_str()));
+
+        // A full replay of the log gives the same base.
+        std::fs::remove_file(ws.ctx.db_path()).expect("remove projection");
+        assert_eq!(ws.review(&id).base_commit.as_deref(), Some(trunk.as_str()));
+    }
+
+    /// When discovery finds nothing (no trunk ref, no upstream), a legacy
+    /// review keeps today's behaviour: no base is recorded, and a target that
+    /// still extends the old one retargets successfully.
+    #[test]
+    fn legacy_review_without_trunk_extends_old_target_without_recording_base() {
+        let mut ws = Workspace::new();
+        ws.branch_commit();
+        let id = ws.create_legacy_review();
+        ws.drop_trunk();
+        let old_target = ws.scm.current_commit().expect("old target");
+        assert_eq!(
+            ws.scm.discover_base_commit(&old_target).expect("discover"),
+            None
+        );
+
+        ws.branch_commit();
+        let new_target = ws.scm.current_commit().expect("new target");
+        assert_eq!(
+            ws.scm.discover_base_commit(&new_target).expect("discover"),
+            None
+        );
+
+        let result = ws.retarget(&id, None).expect("retarget");
+        assert!(!result.base_changed);
+        assert_eq!(result.old_base_commit, None);
+        assert_eq!(result.new_base_commit, None);
+        assert_eq!(result.new_target_commit, new_target);
+
+        assert_eq!(ws.review(&id).base_commit, None);
+        let retargeted = last_retarget(&ws.events(&id));
+        assert_eq!(retargeted.old_base_commit, None);
+        assert_eq!(retargeted.new_base_commit, None);
+    }
+
+    /// Same as above, but the target diverges from (rather than extends) the
+    /// old one, as a rebase would produce. With nothing discoverable, the
+    /// legacy review still has no base to fall back on but its old target, so
+    /// retarget still fails exactly as it did before this fix.
+    #[test]
+    fn legacy_review_without_trunk_and_diverged_target_still_errors() {
+        let mut ws = Workspace::new();
+        ws.branch_commit();
+        let id = ws.create_legacy_review();
+        ws.drop_trunk();
+        let old_target = ws.scm.current_commit().expect("old target");
+
+        // No trunk to rebase onto; rewrite the branch commit in place instead,
+        // producing a target that does not descend from the old one, which is
+        // what a rebase would also produce here.
+        run_git(
+            ws.root(),
+            &["commit", "--amend", "-q", "-m", "branch-0 (amended)"],
+        );
+        let new_target = ws.scm.current_commit().expect("new target");
+        assert_ne!(old_target, new_target);
+        assert!(!ws.scm.is_ancestor(&old_target, &new_target).unwrap());
+        assert_eq!(
+            ws.scm.discover_base_commit(&new_target).expect("discover"),
+            None
+        );
+
+        let before = ws.events(&id).len();
+        let err = ws
+            .retarget(&id, None)
+            .expect_err("diverged target without a discoverable base");
+        assert!(
+            matches!(err, CoreError::InvalidRetargetRange { .. }),
+            "{err}"
+        );
+        assert_eq!(ws.events(&id).len(), before);
     }
 
     #[derive(Debug, Clone, Copy)]
