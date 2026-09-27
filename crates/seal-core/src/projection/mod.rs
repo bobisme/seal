@@ -9,6 +9,8 @@
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::doc_markdown)]
 
+#[cfg(any(test, kani))]
+mod model;
 mod query;
 
 pub use query::{
