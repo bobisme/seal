@@ -80,6 +80,94 @@ pub trait ScmRepo {
     fn discover_base_commit(&self, _target: &str) -> Result<Option<String>> {
         Ok(None)
     }
+
+    /// List every path that differs between the trees of `from` and `to`.
+    ///
+    /// This compares the two trees directly, like `git diff from to`. It
+    /// ignores the commit graph in between, so merge commits need no special
+    /// case. A rename or copy must name BOTH sides, never only the new path.
+    ///
+    /// `None` means this backend cannot list changes. Callers must then
+    /// assume the worst, so the default keeps every approval check strict.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the backend command fails or its output does not
+    /// parse.
+    fn path_changes_between(&self, _from: &str, _to: &str) -> Result<Option<Vec<PathChange>>> {
+        Ok(None)
+    }
+}
+
+/// One path-level difference between two trees.
+///
+/// Paths are repository-relative, with `/` separators.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PathChange {
+    /// The path is new in the later tree.
+    Added(String),
+    /// The path exists in both trees with the same entry type, and its
+    /// content or mode changed.
+    Modified(String),
+    /// The path exists only in the earlier tree.
+    Deleted(String),
+    /// `from` was removed and `to` holds its content.
+    Renamed { from: String, to: String },
+    /// `to` is new and was copied from `from`, which still exists.
+    Copied { from: String, to: String },
+    /// Any other change: an entry type change (file to symlink, submodule),
+    /// a conflict, or a status this code does not know.
+    Other(String),
+}
+
+/// Parse `git diff -z --name-status` output into path changes.
+///
+/// Rename and copy records carry two paths. Any unknown status becomes
+/// [`PathChange::Other`], so it can never pass as a harmless change.
+///
+/// # Errors
+///
+/// Returns an error when a record is missing a path.
+pub fn parse_git_name_status_z(output: &str) -> Result<Vec<PathChange>> {
+    let mut fields = output.split('\0');
+    let mut changes = Vec::new();
+
+    while let Some(status) = fields.next() {
+        if status.is_empty() {
+            // Only the terminator after the final record may be empty.
+            if fields.next().is_some() {
+                bail!("git diff --name-status: empty status field");
+            }
+            break;
+        }
+
+        let mut next_path = || -> Result<String> {
+            match fields.next() {
+                Some(path) if !path.is_empty() => Ok(path.to_string()),
+                _ => bail!("git diff --name-status: status {status} has no path"),
+            }
+        };
+
+        let change = match status.as_bytes()[0] {
+            b'A' => PathChange::Added(next_path()?),
+            b'M' => PathChange::Modified(next_path()?),
+            b'D' => PathChange::Deleted(next_path()?),
+            b'R' => {
+                let from = next_path()?;
+                let to = next_path()?;
+                PathChange::Renamed { from, to }
+            }
+            b'C' => {
+                let from = next_path()?;
+                let to = next_path()?;
+                PathChange::Copied { from, to }
+            }
+            _ => PathChange::Other(next_path()?),
+        };
+        changes.push(change);
+    }
+
+    Ok(changes)
 }
 
 /// Return the repository path represented by one file section from a git-format diff.
@@ -449,6 +537,33 @@ diff --git a/docs/old note.md b/docs/old note.md
                 "docs/old note.md".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn test_parse_git_name_status_z() {
+        let out = "M\0.seal/r/events.jsonl\0A\0new file.txt\0D\0gone\0T\0link\0R100\0a\0.seal/a\0C75\0b\0c\0U\0u\0";
+        assert_eq!(
+            parse_git_name_status_z(out).expect("parse"),
+            vec![
+                PathChange::Modified(".seal/r/events.jsonl".to_string()),
+                PathChange::Added("new file.txt".to_string()),
+                PathChange::Deleted("gone".to_string()),
+                PathChange::Other("link".to_string()),
+                PathChange::Renamed {
+                    from: "a".to_string(),
+                    to: ".seal/a".to_string()
+                },
+                PathChange::Copied {
+                    from: "b".to_string(),
+                    to: "c".to_string()
+                },
+                PathChange::Other("u".to_string()),
+            ]
+        );
+        assert_eq!(parse_git_name_status_z("").expect("empty"), Vec::new());
+        assert!(parse_git_name_status_z("M\0").is_err());
+        assert!(parse_git_name_status_z("R100\0a\0").is_err());
+        assert!(parse_git_name_status_z("M\0a\0\0M\0b\0").is_err());
     }
 
     #[test]

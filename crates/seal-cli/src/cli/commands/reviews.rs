@@ -321,6 +321,7 @@ pub fn run_reviews_request(
         result["approved_commit"] = serde_json::json!(coverage.approved_commit);
         result["target_commit"] = serde_json::json!(coverage.current_target);
         result["uncovered_commits"] = serde_json::json!(coverage.uncovered_commits);
+        result["exempt_commits"] = serde_json::json!(coverage.exempt_commits);
     }
 
     let formatter = Formatter::new(format);
@@ -1576,5 +1577,112 @@ diff --git a/src/has space.rs b/src/has space.rs
     fn test_split_diff_by_file_empty() {
         let result = split_diff_by_file("");
         assert!(result.is_empty());
+    }
+}
+
+/// The merge gate against real Git repositories (bn-rk34).
+#[cfg(test)]
+mod merge_gate_tests {
+    use super::*;
+    use seal_core::scm::git::GitRepo;
+    use std::process::Command;
+
+    fn git(repo: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .current_dir(repo)
+            .args(args)
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// LGTM at commit A on branch `feature`, then `after` runs and commits
+    /// with `git add -A`. Returns the result of `seal reviews mark-merged`.
+    fn merge_after(after: impl FnOnce(&Path, &str)) -> Result<()> {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        git(root, &["init", "-q"]);
+        git(root, &["config", "user.email", "test@example.com"]);
+        git(root, &["config", "user.name", "Test User"]);
+        std::fs::create_dir_all(root.join("src")).expect("mkdir");
+        std::fs::create_dir_all(root.join(".seal/reviews")).expect("mkdir");
+        std::fs::write(root.join(".seal/version"), "2\n").expect("write");
+        std::fs::write(root.join(".seal/.gitignore"), "index.db*\n").expect("write");
+        std::fs::write(root.join("src/lib.rs"), "pub fn f() {}\n").expect("write");
+        git(root, &["add", "-A"]);
+        git(root, &["commit", "-q", "-m", "base"]);
+        git(root, &["checkout", "-q", "-b", "feature"]);
+        std::fs::write(root.join("src/lib.rs"), "pub fn g() {}\n").expect("write");
+        git(root, &["add", "-A"]);
+        git(root, &["commit", "-q", "-m", "feature"]);
+
+        let scm = GitRepo::new(root.to_path_buf());
+        let approved = scm.current_commit().expect("A");
+        let review_id = open_services(root)
+            .expect("services")
+            .reviews()
+            .create(&scm, "t".to_string(), None, None, Some("alice"), None)
+            .expect("create");
+        open_services(root)
+            .expect("services")
+            .reviews()
+            .vote(
+                &review_id,
+                VoteType::Lgtm,
+                None,
+                Some("bob"),
+                Some(approved.clone()),
+            )
+            .expect("lgtm");
+        open_services(root)
+            .expect("services")
+            .reviews()
+            .approve(&review_id, Some("bob"), Some(approved))
+            .expect("approve");
+
+        after(root, &review_id);
+        git(root, &["add", "-A"]);
+        git(root, &["commit", "-q", "--allow-empty", "-m", "after lgtm"]);
+
+        run_reviews_merge(
+            root,
+            &scm,
+            &review_id,
+            None,
+            false,
+            false,
+            Some("alice"),
+            OutputFormat::Json,
+        )
+    }
+
+    #[test]
+    fn committing_only_the_review_log_does_not_block_merge() {
+        merge_after(|_, _| {}).expect("merge succeeds");
+    }
+
+    #[test]
+    fn committing_review_log_with_source_blocks_merge() {
+        let err = merge_after(|root, _| {
+            std::fs::write(root.join("src/lib.rs"), "pub fn evil() {}\n").expect("write");
+        })
+        .expect_err("stale");
+        assert!(
+            err.to_string().contains("does not cover the current code"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn sealignore_change_blocks_merge() {
+        let err = merge_after(|root, _| {
+            std::fs::write(root.join(".sealignore"), "src/\n").expect("write");
+        })
+        .expect_err("stale");
+        assert!(err.to_string().contains("does not cover"), "{err}");
     }
 }

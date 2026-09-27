@@ -8,6 +8,7 @@
 //! Reviews now persist an explicit base. This module resolves the range for
 //! both new and old reviews, so every reader shows the same commits.
 
+use crate::approval_exempt::range_is_exempt;
 use crate::projection::ReviewDetail;
 use crate::scm::ScmRepo;
 
@@ -108,7 +109,8 @@ pub enum StaleReason {
     /// The approval names no commit, so nothing can be checked against it.
     /// Applies to reviews approved before approvals recorded a commit.
     NoApprovedCommit,
-    /// Commits landed on top of the approved commit.
+    /// Commits landed on top of the approved commit, and together they change
+    /// something other than review data under `.seal/`.
     CommitsAdded,
 }
 
@@ -119,8 +121,21 @@ pub struct ApprovalCoverage {
     pub approved_commit: Option<String>,
     /// The commit the review points at now.
     pub current_target: String,
-    /// Commits in `approved_commit..current_target`.
+    /// Commits in `approved_commit..current_target` that the approval does
+    /// not cover.
+    ///
+    /// Exemption is judged on the net tree change of the whole range (see
+    /// [`crate::approval_exempt`]), not commit by commit. So this is `0` when
+    /// the range only records review activity under `.seal/`, and the full
+    /// commit count of the range when it changes anything else. `None` when
+    /// the commits cannot be counted or the two commits are unrelated.
     pub uncovered_commits: Option<usize>,
+    /// Commits in `approved_commit..current_target` that were ignored because
+    /// the range only records review activity under `.seal/`.
+    ///
+    /// `Some(0)` when there is nothing to ignore or the approval is stale.
+    /// `None` when the range has no meaningful count.
+    pub exempt_commits: Option<usize>,
     /// Set when the approval does not cover `current_target`.
     pub stale_reason: Option<StaleReason>,
 }
@@ -141,6 +156,10 @@ impl ApprovalCoverage {
 /// code that no reviewer saw. An approval that recorded no commit is also
 /// stale, because nothing proves it covers the current target.
 ///
+/// Commits that only record review activity under `.seal/` do not make it
+/// stale; [`crate::approval_exempt`] states the exact rule. Without this,
+/// committing the review log after the LGTM would always stale the LGTM.
+///
 /// Commits that are not descendants of the approved commit do not count.
 /// A rewrite or an unrelated branch leaves the two commits unrelated, and
 /// counting that distance would report a meaningless number.
@@ -157,6 +176,7 @@ pub fn approval_coverage(scm: &dyn ScmRepo, review: &ReviewDetail) -> Option<App
             approved_commit: None,
             current_target,
             uncovered_commits: None,
+            exempt_commits: None,
             stale_reason: Some(StaleReason::NoApprovedCommit),
         });
     };
@@ -166,6 +186,7 @@ pub fn approval_coverage(scm: &dyn ScmRepo, review: &ReviewDetail) -> Option<App
             approved_commit: Some(approved_commit),
             current_target,
             uncovered_commits: Some(0),
+            exempt_commits: Some(0),
             stale_reason: None,
         });
     }
@@ -180,18 +201,34 @@ pub fn approval_coverage(scm: &dyn ScmRepo, review: &ReviewDetail) -> Option<App
             approved_commit: Some(approved_commit),
             current_target,
             uncovered_commits: None,
+            exempt_commits: None,
             stale_reason: Some(StaleReason::CommitsAdded),
         });
     }
 
-    let uncovered = scm
+    let in_range = scm
         .count_commits_between(&approved_commit, &current_target)
         .unwrap_or(None);
+
+    // Commits that only record review activity (appending to review logs,
+    // adding other .seal/ data) cannot change the approved code. The check
+    // compares the trees of the two commits, so merges in between need no
+    // special case, and any failure counts as a real change.
+    if range_is_exempt(scm, &approved_commit, &current_target) {
+        return Some(ApprovalCoverage {
+            approved_commit: Some(approved_commit),
+            current_target,
+            uncovered_commits: Some(0),
+            exempt_commits: in_range,
+            stale_reason: None,
+        });
+    }
 
     Some(ApprovalCoverage {
         approved_commit: Some(approved_commit),
         current_target,
-        uncovered_commits: uncovered,
+        uncovered_commits: in_range,
+        exempt_commits: Some(0),
         stale_reason: Some(StaleReason::CommitsAdded),
     })
 }
@@ -443,5 +480,251 @@ mod tests {
 
         assert!(coverage.is_stale());
         assert_eq!(coverage.uncovered_commits, None);
+    }
+
+    // ---- Real Git repositories: commits after the approval that only record
+    // ---- review activity under .seal/ (bn-rk34).
+
+    mod git_exemption {
+        use super::approved_review;
+        use crate::range::{approval_coverage, ApprovalCoverage, StaleReason};
+        use crate::scm::git::GitRepo;
+        use std::path::Path;
+        use std::process::Command;
+        use tempfile::TempDir;
+
+        const LOG: &str = ".seal/reviews/cr-1/events.jsonl";
+
+        fn git(repo: &Path, args: &[&str]) -> String {
+            let output = Command::new("git")
+                .current_dir(repo)
+                .args(args)
+                .output()
+                .expect("run git");
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout)
+                .expect("utf8")
+                .trim()
+                .to_string()
+        }
+
+        fn write(repo: &Path, path: &str, body: &str) {
+            let full = repo.join(path);
+            std::fs::create_dir_all(full.parent().expect("parent")).expect("mkdir");
+            std::fs::write(full, body).expect("write");
+        }
+
+        fn append(repo: &Path, path: &str, body: &str) {
+            let old = std::fs::read_to_string(repo.join(path)).expect("read");
+            write(repo, path, &format!("{old}{body}"));
+        }
+
+        fn commit_all(repo: &Path, message: &str) -> String {
+            git(repo, &["add", "-A"]);
+            git(repo, &["commit", "-q", "--allow-empty", "-m", message]);
+            git(repo, &["rev-parse", "HEAD"])
+        }
+
+        /// A repo on `main` whose approved commit A holds source, a review
+        /// log and other seal data. Returns (dir, scm, A).
+        fn repo_approved_at_a() -> (TempDir, GitRepo, String) {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let root = dir.path();
+            git(root, &["init", "-q"]);
+            git(root, &["config", "user.email", "test@example.com"]);
+            git(root, &["config", "user.name", "Test User"]);
+            // Renames must never hide the old side, whatever the config says.
+            git(root, &["config", "diff.renames", "copies"]);
+            write(root, "src/lib.rs", "pub fn f() {}\n");
+            write(root, ".seal/version", "2\n");
+            write(root, LOG, "{\"event\":\"created\"}\n");
+            let a = commit_all(root, "feature");
+            git(root, &["branch", "-M", "main"]);
+            let scm = GitRepo::new(root.to_path_buf());
+            (dir, scm, a)
+        }
+
+        fn coverage(scm: &GitRepo, approved: &str) -> ApprovalCoverage {
+            let mut review = approved_review("approved", Some(approved));
+            review.scm_anchor = "refs/heads/main".to_string();
+            review.jj_change_id = "refs/heads/main".to_string();
+            review.initial_commit = approved.to_string();
+            approval_coverage(scm, &review).expect("coverage")
+        }
+
+        fn assert_stale(scm: &GitRepo, a: &str, commits: usize) {
+            let c = coverage(scm, a);
+            assert_eq!(c.stale_reason, Some(StaleReason::CommitsAdded));
+            assert_eq!(c.uncovered_commits, Some(commits));
+            assert_eq!(c.exempt_commits, Some(0));
+        }
+
+        fn assert_fresh(scm: &GitRepo, a: &str, commits: usize) {
+            let c = coverage(scm, a);
+            assert!(!c.is_stale(), "expected fresh, got {c:?}");
+            assert_eq!(c.uncovered_commits, Some(0));
+            assert_eq!(c.exempt_commits, Some(commits));
+        }
+
+        #[test]
+        fn appending_to_review_log_keeps_approval_fresh() {
+            let (dir, scm, a) = repo_approved_at_a();
+            append(dir.path(), LOG, "{\"event\":\"lgtm\"}\n");
+            commit_all(dir.path(), "chore: seal review cr-1");
+            append(dir.path(), LOG, "{\"event\":\"comment\"}\n");
+            commit_all(dir.path(), "chore: seal reply");
+            assert_fresh(&scm, &a, 2);
+        }
+
+        #[test]
+        fn new_review_log_and_seal_data_keep_approval_fresh() {
+            let (dir, scm, a) = repo_approved_at_a();
+            write(dir.path(), ".seal/reviews/cr-2/events.jsonl", "{}\n");
+            write(dir.path(), ".seal/version", "3\n");
+            commit_all(dir.path(), "chore: seal");
+            assert_fresh(&scm, &a, 1);
+        }
+
+        #[test]
+        fn empty_commit_keeps_approval_fresh() {
+            let (dir, scm, a) = repo_approved_at_a();
+            commit_all(dir.path(), "empty");
+            assert_fresh(&scm, &a, 1);
+        }
+
+        #[test]
+        fn mixed_seal_and_source_commit_is_stale() {
+            let (dir, scm, a) = repo_approved_at_a();
+            append(dir.path(), LOG, "{\"event\":\"lgtm\"}\n");
+            append(dir.path(), "src/lib.rs", "pub fn g() {}\n");
+            commit_all(dir.path(), "mixed");
+            assert_stale(&scm, &a, 1);
+        }
+
+        #[test]
+        fn source_commit_after_seal_commit_is_stale() {
+            let (dir, scm, a) = repo_approved_at_a();
+            append(dir.path(), LOG, "{\"event\":\"lgtm\"}\n");
+            commit_all(dir.path(), "seal");
+            write(dir.path(), "src/new.rs", "\n");
+            commit_all(dir.path(), "code");
+            assert_stale(&scm, &a, 2);
+        }
+
+        #[test]
+        fn deleting_review_log_is_stale() {
+            let (dir, scm, a) = repo_approved_at_a();
+            git(dir.path(), &["rm", "-q", LOG]);
+            commit_all(dir.path(), "drop log");
+            assert_stale(&scm, &a, 1);
+        }
+
+        #[test]
+        fn rewriting_review_log_is_stale() {
+            let (dir, scm, a) = repo_approved_at_a();
+            write(
+                dir.path(),
+                LOG,
+                "{\"event\":\"forged\"}\n{\"event\":\"lgtm\"}\n",
+            );
+            commit_all(dir.path(), "rewrite log");
+            assert_stale(&scm, &a, 1);
+        }
+
+        #[test]
+        fn truncating_review_log_is_stale() {
+            let (dir, scm, a) = repo_approved_at_a();
+            write(dir.path(), LOG, "");
+            commit_all(dir.path(), "truncate log");
+            assert_stale(&scm, &a, 1);
+        }
+
+        #[test]
+        fn renaming_source_into_seal_is_stale() {
+            let (dir, scm, a) = repo_approved_at_a();
+            git(dir.path(), &["mv", "src/lib.rs", ".seal/lib.rs"]);
+            commit_all(dir.path(), "hide source");
+            assert_stale(&scm, &a, 1);
+        }
+
+        #[test]
+        fn renaming_seal_data_out_of_seal_is_stale() {
+            let (dir, scm, a) = repo_approved_at_a();
+            git(dir.path(), &["mv", ".seal/version", "src/version"]);
+            commit_all(dir.path(), "move out");
+            assert_stale(&scm, &a, 1);
+        }
+
+        #[test]
+        fn renaming_review_log_within_seal_is_stale() {
+            let (dir, scm, a) = repo_approved_at_a();
+            git(
+                dir.path(),
+                &["mv", ".seal/reviews/cr-1", ".seal/reviews/cr-9"],
+            );
+            commit_all(dir.path(), "move log");
+            assert_stale(&scm, &a, 1);
+        }
+
+        #[test]
+        fn sealignore_change_is_stale() {
+            let (dir, scm, a) = repo_approved_at_a();
+            write(dir.path(), ".sealignore", "src/\n");
+            commit_all(dir.path(), "ignore everything");
+            assert_stale(&scm, &a, 1);
+        }
+
+        #[test]
+        fn nested_seal_directory_is_stale() {
+            let (dir, scm, a) = repo_approved_at_a();
+            write(dir.path(), "src/.seal/x", "x\n");
+            commit_all(dir.path(), "nested");
+            assert_stale(&scm, &a, 1);
+        }
+
+        #[test]
+        fn merge_bringing_in_source_is_stale() {
+            let (dir, scm, a) = repo_approved_at_a();
+            let root = dir.path();
+            git(root, &["checkout", "-q", "-b", "side"]);
+            write(root, "src/side.rs", "\n");
+            commit_all(root, "side code");
+            git(root, &["checkout", "-q", "main"]);
+            append(root, LOG, "{\"event\":\"lgtm\"}\n");
+            commit_all(root, "seal");
+            git(root, &["merge", "-q", "--no-edit", "side"]);
+            // seal, side code, and the merge.
+            assert_stale(&scm, &a, 3);
+        }
+
+        #[test]
+        fn merge_of_seal_only_side_branch_is_fresh() {
+            let (dir, scm, a) = repo_approved_at_a();
+            let root = dir.path();
+            git(root, &["checkout", "-q", "-b", "side"]);
+            write(root, ".seal/reviews/cr-2/events.jsonl", "{}\n");
+            commit_all(root, "side seal");
+            git(root, &["checkout", "-q", "main"]);
+            append(root, LOG, "{\"event\":\"lgtm\"}\n");
+            commit_all(root, "seal");
+            git(root, &["merge", "-q", "--no-edit", "side"]);
+            assert_fresh(&scm, &a, 3);
+        }
+
+        #[test]
+        fn reverted_source_change_is_fresh_because_trees_match() {
+            // The merged code is byte-identical to the approved code.
+            let (dir, scm, a) = repo_approved_at_a();
+            let root = dir.path();
+            write(root, "src/lib.rs", "evil\n");
+            commit_all(root, "change");
+            write(root, "src/lib.rs", "pub fn f() {}\n");
+            commit_all(root, "revert");
+            assert_fresh(&scm, &a, 2);
+        }
     }
 }

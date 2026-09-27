@@ -248,6 +248,7 @@ pub fn run_diff(
         "approval_stale": coverage.as_ref().map(seal_core::range::ApprovalCoverage::is_stale),
         "approved_commit": coverage.as_ref().and_then(|c| c.approved_commit.clone()),
         "uncovered_commits": coverage.as_ref().and_then(|c| c.uncovered_commits),
+        "exempt_commits": coverage.as_ref().and_then(|c| c.exempt_commits),
         "initial_commit": review.initial_commit,
         "target_commit": target_commit,
         "changed_files": changed_files,

@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
 use crate::jj::{resolve_workspace_root, JjRepo};
-use crate::scm::{validate_anchor, validate_repo_relative_path, ScmKind, ScmRepo};
+use crate::scm::{validate_anchor, validate_repo_relative_path, PathChange, ScmKind, ScmRepo};
 
 #[derive(Debug, Clone)]
 pub struct JjScmRepo {
@@ -97,6 +97,12 @@ impl ScmRepo for JjScmRepo {
         self.inner.count_commits_between(base, target).map(Some)
     }
 
+    fn path_changes_between(&self, from: &str, to: &str) -> Result<Option<Vec<PathChange>>> {
+        validate_anchor(from)?;
+        validate_anchor(to)?;
+        self.inner.path_changes_between(from, to).map(Some)
+    }
+
     fn discover_base_commit(&self, target: &str) -> Result<Option<String>> {
         validate_anchor(target)?;
 
@@ -111,5 +117,114 @@ impl ScmRepo for JjScmRepo {
         }
 
         Ok(Some(base))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::approval_exempt::range_is_exempt;
+    use crate::jj::parse_jj_diff_entries;
+    use std::process::Command;
+
+    #[test]
+    fn parse_jj_entries_keeps_both_rename_sides() {
+        let out = "renamed\0src/x.rs\0.seal/x.rs\0file\0file\0\
+                   modified\0.seal/a\0.seal/a\0file\0file\0\
+                   modified\0.seal/b\0.seal/b\0file\0symlink\0\
+                   modified\0.seal/c\0.seal/c\0conflict\0conflict\0\
+                   removed\0d\0d\0file\0\0\
+                   added\0n\0n\0\0file\0\
+                   copied\0.seal/p\0.seal/q\0file\0file\0\
+                   weird\0w\0w\0file\0file\0";
+        assert_eq!(
+            parse_jj_diff_entries(out).expect("parse"),
+            vec![
+                PathChange::Renamed {
+                    from: "src/x.rs".to_string(),
+                    to: ".seal/x.rs".to_string()
+                },
+                PathChange::Modified(".seal/a".to_string()),
+                PathChange::Other(".seal/b".to_string()),
+                PathChange::Other(".seal/c".to_string()),
+                PathChange::Deleted("d".to_string()),
+                PathChange::Added("n".to_string()),
+                PathChange::Copied {
+                    from: ".seal/p".to_string(),
+                    to: ".seal/q".to_string()
+                },
+                PathChange::Other("w".to_string()),
+            ]
+        );
+        assert_eq!(parse_jj_diff_entries("").expect("empty"), Vec::new());
+        assert!(parse_jj_diff_entries("added\0n\0n\0\0file").is_err());
+        assert!(parse_jj_diff_entries("added\0n\0n\0").is_err());
+    }
+
+    fn jj(root: &Path, args: &[&str]) {
+        let output = Command::new("jj")
+            .current_dir(root)
+            .args([
+                "--config",
+                "user.name=Test",
+                "--config",
+                "user.email=t@example.com",
+            ])
+            .args(args)
+            .output()
+            .expect("run jj");
+        assert!(
+            output.status.success(),
+            "jj {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn write(root: &Path, path: &str, body: &str) {
+        let full = root.join(path);
+        std::fs::create_dir_all(full.parent().expect("parent")).expect("mkdir");
+        std::fs::write(full, body).expect("write");
+    }
+
+    /// jj reports renames as one entry; both sides must reach the classifier.
+    #[test]
+    fn jj_rename_into_seal_is_not_exempt_but_log_append_is() {
+        if which::which("jj").is_err() {
+            eprintln!("skipping: jj not installed");
+            return;
+        }
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        jj(root, &["git", "init", "."]);
+        write(root, "src/x.rs", "fn a() {}\nfn b() {}\nfn c() {}\n");
+        write(root, ".seal/reviews/cr-1/events.jsonl", "{}\n");
+        jj(root, &["commit", "-m", "approved"]);
+        let repo = JjScmRepo::new(root);
+        let approved = repo.commit_for_anchor("@-").expect("approved");
+
+        // Append only to the log.
+        write(
+            root,
+            ".seal/reviews/cr-1/events.jsonl",
+            "{}\n{\"lgtm\":1}\n",
+        );
+        let target = repo.commit_for_anchor("@").expect("target");
+        assert!(range_is_exempt(&repo, &approved, &target));
+
+        // Now also move source into .seal/.
+        std::fs::rename(root.join("src/x.rs"), root.join(".seal/x.rs")).expect("mv");
+        let target = repo.commit_for_anchor("@").expect("target");
+        assert!(!range_is_exempt(&repo, &approved, &target));
+        let changes = repo
+            .path_changes_between(&approved, &target)
+            .expect("changes")
+            .expect("supported");
+        assert!(
+            changes.contains(&PathChange::Renamed {
+                from: "src/x.rs".to_string(),
+                to: ".seal/x.rs".to_string()
+            }),
+            "{changes:?}"
+        );
     }
 }

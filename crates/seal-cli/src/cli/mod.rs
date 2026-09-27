@@ -369,7 +369,9 @@ pub enum ReviewsCommands {
         /// Merge even when the approval predates the code being merged.
         ///
         /// By default seal refuses, because commits added after the approval
-        /// were never reviewed.
+        /// were never reviewed. Commits that only record review activity
+        /// under .seal/ (new files, or appends to a review's events.jsonl)
+        /// do not make the approval stale.
         #[arg(long = "allow-stale-approval")]
         allow_stale_approval: bool,
     },

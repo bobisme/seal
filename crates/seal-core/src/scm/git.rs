@@ -2,7 +2,10 @@ use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::scm::{validate_anchor, validate_repo_relative_path, ScmKind, ScmRepo};
+use crate::scm::{
+    parse_git_name_status_z, validate_anchor, validate_repo_relative_path, PathChange, ScmKind,
+    ScmRepo,
+};
 
 #[derive(Debug, Clone)]
 pub struct GitRepo {
@@ -286,6 +289,36 @@ impl ScmRepo for GitRepo {
             .with_context(|| format!("Failed to count commits in {range}"))?;
 
         Ok(output.trim().parse::<usize>().ok())
+    }
+
+    fn path_changes_between(&self, from: &str, to: &str) -> Result<Option<Vec<PathChange>>> {
+        validate_anchor(from)?;
+        validate_anchor(to)?;
+
+        // Each flag closes a way to hide a change from this list:
+        // --no-renames      a rename shows as D old + A new, so the old side
+        //                   is never dropped (diff.renames is on by default).
+        // --no-relative     diff.relative=true would drop paths outside cwd.
+        // --ignore-submodules=none
+        //                   diff.ignoreSubmodules=all would hide gitlink moves.
+        // --no-ext-diff     no external diff driver runs.
+        let output = self
+            .run_git(&[
+                "diff",
+                "-z",
+                "--name-status",
+                "--no-renames",
+                "--no-relative",
+                "--ignore-submodules=none",
+                "--no-ext-diff",
+                "--end-of-options",
+                from,
+                to,
+                "--",
+            ])
+            .with_context(|| format!("Failed to list path changes from {from} to {to}"))?;
+
+        parse_git_name_status_z(&output).map(Some)
     }
 
     fn discover_base_commit(&self, target: &str) -> Result<Option<String>> {

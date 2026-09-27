@@ -376,6 +376,29 @@ impl JjRepo {
             .collect())
     }
 
+    /// List every path that differs between the trees of `from` and `to`.
+    ///
+    /// `--name-only` prints only the new side of a rename, so this uses a
+    /// template that names both sides. Fields are NUL-terminated, five per
+    /// entry: status, source path, target path, source type, target type.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the jj command fails or its output does not parse.
+    pub fn path_changes_between(
+        &self,
+        from: &str,
+        to: &str,
+    ) -> Result<Vec<crate::scm::PathChange>> {
+        const TEMPLATE: &str = r#"status ++ "\0" ++ source.path() ++ "\0" ++ target.path() ++ "\0" ++ source.file_type() ++ "\0" ++ target.file_type() ++ "\0""#;
+
+        let output = self
+            .run_jj(&["diff", "--from", from, "--to", to, "-T", TEMPLATE])
+            .with_context(|| format!("Failed to list path changes from {from} to {to}"))?;
+
+        parse_jj_diff_entries(&output)
+    }
+
     /// Count the commits in the revset `base..target`.
     ///
     /// # Errors
@@ -434,6 +457,60 @@ impl JjRepo {
             .find(|line| !line.trim().is_empty())
             .map(|line| line.trim().to_string()))
     }
+}
+
+/// Parse the NUL-separated output of [`JjRepo::path_changes_between`].
+///
+/// Any status or type combination this code does not know becomes
+/// [`crate::scm::PathChange::Other`], which never passes as harmless.
+///
+/// # Errors
+///
+/// Returns an error when the output does not split into whole entries.
+pub fn parse_jj_diff_entries(output: &str) -> Result<Vec<crate::scm::PathChange>> {
+    use crate::scm::PathChange;
+
+    let Some(body) = output.strip_suffix('\0') else {
+        if output.is_empty() {
+            return Ok(Vec::new());
+        }
+        bail!("jj diff: output does not end with a field terminator");
+    };
+
+    let fields: Vec<&str> = body.split('\0').collect();
+    if !fields.len().is_multiple_of(5) {
+        bail!("jj diff: expected 5 fields per entry, got {}", fields.len());
+    }
+
+    let (entries, _) = fields.as_chunks::<5>();
+    let mut changes = Vec::with_capacity(entries.len());
+    for [status, source, target, source_type, target_type] in entries {
+        if source.is_empty() || target.is_empty() {
+            bail!("jj diff: entry with status {status} has an empty path");
+        }
+
+        let change = match *status {
+            "added" => PathChange::Added((*target).to_string()),
+            "removed" => PathChange::Deleted((*source).to_string()),
+            "modified"
+                if source == target && source_type == target_type && *source_type != "conflict" =>
+            {
+                PathChange::Modified((*target).to_string())
+            }
+            "renamed" => PathChange::Renamed {
+                from: (*source).to_string(),
+                to: (*target).to_string(),
+            },
+            "copied" => PathChange::Copied {
+                from: (*source).to_string(),
+                to: (*target).to_string(),
+            },
+            _ => PathChange::Other((*target).to_string()),
+        };
+        changes.push(change);
+    }
+
+    Ok(changes)
 }
 
 #[cfg(test)]
