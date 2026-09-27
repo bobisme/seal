@@ -915,6 +915,31 @@ struct StoredFileState {
     prefix_hash: String,
 }
 
+/// Load all `review_file_state` rows into a map keyed by review id.
+fn load_stored_file_states(db: &ProjectionDb) -> Result<HashMap<String, StoredFileState>> {
+    let mut stored_states = HashMap::new();
+    let mut stmt = db
+        .conn
+        .prepare("SELECT review_id, line_count, byte_count, prefix_hash FROM review_file_state")
+        .context("Failed to prepare review_file_state query")?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                StoredFileState {
+                    line_count: row.get::<_, i64>(1)? as usize,
+                    prefix_hash: row.get::<_, String>(3)?,
+                },
+            ))
+        })
+        .context("Failed to query review_file_state")?;
+    for row in rows {
+        let (review_id, state) = row.context("Failed to read review_file_state row")?;
+        stored_states.insert(review_id, state);
+    }
+    Ok(stored_states)
+}
+
 /// Sync the projection from per-review event logs (v2 format).
 ///
 /// Uses per-file monotonic sync: each review file is independently tracked
@@ -930,31 +955,26 @@ pub fn sync_from_review_logs(db: &ProjectionDb, seal_root: &Path) -> Result<Sync
     };
 
     // Step 1: Load all review_file_state rows into a HashMap
-    let mut stored_states: HashMap<String, StoredFileState> = HashMap::new();
-    {
-        let mut stmt = db
-            .conn
-            .prepare("SELECT review_id, line_count, byte_count, prefix_hash FROM review_file_state")
-            .context("Failed to prepare review_file_state query")?;
-        let rows = stmt
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    StoredFileState {
-                        line_count: row.get::<_, i64>(1)? as usize,
-                        prefix_hash: row.get::<_, String>(3)?,
-                    },
-                ))
-            })
-            .context("Failed to query review_file_state")?;
-        for row in rows {
-            let (review_id, state) = row.context("Failed to read review_file_state row")?;
-            stored_states.insert(review_id, state);
-        }
-    }
+    let mut stored_states = load_stored_file_states(db)?;
 
-    // Step 1b: Bootstrap — if projection has data but review_file_state is empty,
-    // seed review_file_state from current on-disk files without replaying events.
+    // Step 1b: Bootstrap — if the projection has data but review_file_state is
+    // empty (e.g. an `index.db` created before `review_file_state` existed,
+    // upgraded via `migrate_schema`'s `CREATE TABLE IF NOT EXISTS`), we cannot
+    // assume the existing projection already matches what's on disk: reviews
+    // may have gained events since the projection was last built, or a review
+    // log may exist on disk with no projected review at all. Seeding file
+    // state from the current on-disk content *without* replaying (the old
+    // behavior) would permanently hide any such divergence, because the seeded
+    // state claims the projection is already caught up.
+    //
+    // Instead, rebuild each on-disk review from its log via
+    // `rebuild_review_from_log`, which atomically deletes that one review's
+    // projected rows and replays its log from scratch (bn-2h0a). This is
+    // correct regardless of whether the existing projection matched the logs,
+    // and it naturally creates projected rows for reviews that had a log but
+    // no projection. Reviews with projected rows but no on-disk log file are
+    // never touched here (we only iterate on-disk ids), which preserves the
+    // bn-2h0a invariant that a missing log does not delete projected data.
     let projection_has_data: bool = db
         .conn
         .query_row("SELECT COUNT(*) > 0 FROM reviews", [], |row| row.get(0))
@@ -963,32 +983,35 @@ pub fn sync_from_review_logs(db: &ProjectionDb, seal_root: &Path) -> Result<Sync
     if projection_has_data && stored_states.is_empty() {
         let on_disk_ids = list_review_ids(seal_root)?;
         for review_id in &on_disk_ids {
-            if let Ok(log) = ReviewLog::new(seal_root, review_id) {
-                let byte_count = log.byte_len().unwrap_or(0);
-                let line_count = log.total_lines().unwrap_or(0);
-                let prefix_hash = log
-                    .prefix_hash(line_count)
-                    .ok()
-                    .flatten()
-                    .unwrap_or_default();
+            // Skip genuinely empty logs (0 bytes): nothing to replay, and
+            // treating them as new/untouched below via `sync_new_file` in the
+            // usual way avoids a spurious "no ReviewCreated event" anomaly.
+            let byte_len = ReviewLog::new(seal_root, review_id)
+                .and_then(|log| log.byte_len())
+                .unwrap_or(0);
+            if byte_len == 0 {
+                continue;
+            }
 
-                if byte_count > 0 && line_count > 0 && !prefix_hash.is_empty() {
-                    db.conn
-                        .execute(
-                            "INSERT OR IGNORE INTO review_file_state (review_id, line_count, byte_count, prefix_hash) VALUES (?, ?, ?, ?)",
-                            params![review_id, line_count as i64, byte_count as i64, prefix_hash],
-                        )
-                        .ok();
-                    stored_states.insert(
-                        review_id.clone(),
-                        StoredFileState {
-                            line_count,
-                            prefix_hash,
-                        },
-                    );
+            match rebuild_review_from_log(db, seal_root, review_id) {
+                Ok(applied) => {
+                    if applied > 0 {
+                        report.applied += applied;
+                        report.files_synced += 1;
+                    }
+                }
+                Err(e) => {
+                    report.anomalies.push(SyncAnomaly {
+                        review_id: review_id.clone(),
+                        kind: AnomalyKind::ParseError,
+                        detail: format!("bootstrap rebuild failed: {e}"),
+                    });
                 }
             }
         }
+
+        // Reload: the rebuilds above wrote fresh review_file_state rows.
+        stored_states = load_stored_file_states(db)?;
     }
 
     // Step 2: Discover files on disk
@@ -4605,7 +4628,8 @@ mod tests {
 
     #[test]
     fn test_per_file_sync_bootstrap_existing_projection() {
-        // Existing projection with no review_file_state should bootstrap
+        // Existing projection with no review_file_state should bootstrap by
+        // rebuilding from the log, not by seeding state without replaying.
         let dir = tempdir().unwrap();
         let seal_root = dir.path();
 
@@ -4629,12 +4653,20 @@ mod tests {
             .unwrap();
         assert_eq!(state_count, 0, "should start with empty review_file_state");
 
-        // Sync should bootstrap (seed review_file_state) without replaying events
+        // Sync should bootstrap by rebuilding cr-legacy from its log (replaying
+        // its one event), then the normal per-file pass finds nothing new.
         let report = sync_from_review_logs(&db, seal_root).unwrap();
-        assert_eq!(report.applied, 0, "should NOT replay events on bootstrap");
+        assert_eq!(
+            report.applied, 1,
+            "bootstrap should replay the review's log, not just seed state"
+        );
+        assert_eq!(
+            report.files_synced, 1,
+            "bootstrap rebuild counts as a synced file"
+        );
         assert_eq!(
             report.files_skipped, 1,
-            "file should be skipped (already synced via bootstrap)"
+            "the immediately-following per-file pass finds no new lines"
         );
 
         // review_file_state should now have a row
@@ -4645,6 +4677,195 @@ mod tests {
             })
             .unwrap();
         assert_eq!(state_count2, 1, "should have seeded review_file_state");
+
+        // The projection should still have exactly one review (rebuilt, not duplicated).
+        let review_count: i64 = db
+            .conn()
+            .query_row("SELECT COUNT(*) FROM reviews", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            review_count, 1,
+            "review should not be duplicated by rebuild"
+        );
+    }
+
+    #[test]
+    fn test_bn_7uli_bootstrap_replays_stale_projection() {
+        // bn-7uli: two reviews A and B are synced normally. review_file_state
+        // is then emptied (simulating an index.db upgraded from before
+        // review_file_state existed). A's log then gains new events. Today
+        // the bootstrap path seeds file state from the *current* on-disk
+        // content without replaying, so it never notices A's log changed
+        // since the projection was built, and the new events are lost forever.
+        let dir = tempdir().unwrap();
+        let seal_root = dir.path();
+
+        let db = ProjectionDb::open_in_memory().unwrap();
+        db.init_schema().unwrap();
+
+        let log_a = crate::log::ReviewLog::new(seal_root, "cr-a").unwrap();
+        log_a.append(&make_review_created("cr-a")).unwrap();
+        let log_b = crate::log::ReviewLog::new(seal_root, "cr-b").unwrap();
+        log_b.append(&make_review_created("cr-b")).unwrap();
+
+        let report1 = sync_from_review_logs(&db, seal_root).unwrap();
+        assert_eq!(report1.applied, 2, "both reviews synced normally");
+
+        // Simulate an upgrade: review_file_state is empty but the projection
+        // (reviews table) still has the previously synced rows.
+        db.conn()
+            .execute("DELETE FROM review_file_state", [])
+            .unwrap();
+
+        // A's log gains a new event that was never seen by the projection.
+        log_a.append(&make_thread_created("th-a", "cr-a")).unwrap();
+
+        let report2 = sync_from_review_logs(&db, seal_root).unwrap();
+
+        // The bootstrap path rebuilds each on-disk review from scratch (full
+        // delete + replay), so the count reflects every event in both logs
+        // (2 for cr-a's now-grown log, 1 for cr-b's unchanged log) — not just
+        // the single new event. What matters is that cr-a's new event made it
+        // in at all, checked below via the projected thread count.
+        assert_eq!(
+            report2.applied, 3,
+            "bootstrap must rebuild from the logs on disk (which include cr-a's \
+             new event), not silently skip replay"
+        );
+
+        let thread_count: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM threads WHERE review_id = 'cr-a'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            thread_count, 1,
+            "cr-a's new thread must be visible in the projection after bootstrap"
+        );
+
+        // Both reviews must still be present, not lost or duplicated.
+        let review_count: i64 = db
+            .conn()
+            .query_row("SELECT COUNT(*) FROM reviews", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            review_count, 2,
+            "both reviews must remain projected exactly once"
+        );
+    }
+
+    #[test]
+    fn test_bn_7uli_bootstrap_picks_up_unprojected_review_log() {
+        // bn-7uli: a review log exists on disk (cr-orphan) that was never
+        // applied to the projection at all (e.g. sync crashed, or the
+        // projection was restored from an older backup). review_file_state is
+        // empty. The bootstrap path today only ever seeds file state for
+        // whatever it finds on disk and marks it "already synced" — even
+        // though there is no projected row for cr-orphan — so the review is
+        // never picked up.
+        let dir = tempdir().unwrap();
+        let seal_root = dir.path();
+
+        let db = ProjectionDb::open_in_memory().unwrap();
+        db.init_schema().unwrap();
+
+        // cr-known is projected normally, to make `reviews` non-empty and
+        // trigger the bootstrap branch (`projection_has_data`).
+        let log_known = crate::log::ReviewLog::new(seal_root, "cr-known").unwrap();
+        log_known.append(&make_review_created("cr-known")).unwrap();
+        sync_from_review_logs(&db, seal_root).unwrap();
+        db.conn()
+            .execute("DELETE FROM review_file_state", [])
+            .unwrap();
+
+        // cr-orphan has a log on disk but was never applied to the projection.
+        let log_orphan = crate::log::ReviewLog::new(seal_root, "cr-orphan").unwrap();
+        log_orphan
+            .append(&make_review_created("cr-orphan"))
+            .unwrap();
+
+        let report = sync_from_review_logs(&db, seal_root).unwrap();
+
+        // Bootstrap rebuilds every on-disk review from scratch, so both
+        // cr-known's and cr-orphan's ReviewCreated events are counted.
+        assert_eq!(
+            report.applied, 2,
+            "cr-orphan's ReviewCreated event must be replayed during bootstrap, \
+             not silently ignored just because it was never projected before"
+        );
+
+        let orphan_count: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM reviews WHERE review_id = 'cr-orphan'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            orphan_count, 1,
+            "cr-orphan must be projected after bootstrap, not silently ignored"
+        );
+    }
+
+    #[test]
+    fn test_bn_7uli_bootstrap_preserves_reviews_with_missing_logs() {
+        // bn-2h0a invariant: a review whose log file is missing from disk but
+        // has projected rows must be preserved, not deleted. This must hold
+        // during the bootstrap path too.
+        let dir = tempdir().unwrap();
+        let seal_root = dir.path();
+
+        let db = ProjectionDb::open_in_memory().unwrap();
+        db.init_schema().unwrap();
+
+        let log_a = crate::log::ReviewLog::new(seal_root, "cr-a").unwrap();
+        log_a.append(&make_review_created("cr-a")).unwrap();
+        let log_gone = crate::log::ReviewLog::new(seal_root, "cr-gone").unwrap();
+        log_gone.append(&make_review_created("cr-gone")).unwrap();
+
+        sync_from_review_logs(&db, seal_root).unwrap();
+
+        // Simulate an upgrade with an empty review_file_state, and cr-gone's
+        // log file disappearing from disk (moved workspace, manual cleanup,
+        // etc.) while its projected row remains.
+        db.conn()
+            .execute("DELETE FROM review_file_state", [])
+            .unwrap();
+        std::fs::remove_file(log_gone.path()).unwrap();
+
+        let report = sync_from_review_logs(&db, seal_root).unwrap();
+        assert!(
+            report.anomalies.iter().all(|a| a.review_id != "cr-gone"),
+            "a missing log during bootstrap should not be treated as an error \
+             for a review that was never touched (it's simply not on disk)"
+        );
+
+        let gone_count: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM reviews WHERE review_id = 'cr-gone'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            gone_count, 1,
+            "cr-gone's projected row must survive bootstrap despite its log being gone"
+        );
+
+        let a_count: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM reviews WHERE review_id = 'cr-a'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(a_count, 1, "cr-a should still be projected too");
     }
 
     #[test]

@@ -439,6 +439,114 @@ fn stored_line_count(db: &ProjectionDb, review_id: &str) -> Option<i64> {
         .unwrap()
 }
 
+// ============================================================================
+// bn-7uli: bootstrap must not trust a stale/incomplete prior projection
+// ============================================================================
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(32))]
+
+    /// bn-7uli: `review_file_state` can end up empty while the projection
+    /// (`reviews` and friends) still has rows — e.g. an `index.db` created
+    /// before `review_file_state` existed, upgraded via `migrate_schema`'s
+    /// `CREATE TABLE IF NOT EXISTS`. The old "bootstrap" path seeded
+    /// `review_file_state` from the *current* on-disk content without
+    /// replaying, silently trusting that the existing projection already
+    /// matched the logs on disk.
+    ///
+    /// This property states that it must not matter: for any prior
+    /// projection state P (here, built by syncing an arbitrary prefix of
+    /// each review's log, then letting the log grow further before
+    /// `review_file_state` is emptied and synced again), the resulting
+    /// projection for every review that has a log on disk must equal a
+    /// completely fresh sync of those same logs into an empty database.
+    #[test]
+    fn prop_bootstrap_ignores_stale_projection(
+        review_count in 1usize..=3,
+        script0 in arb_full_review_script("cr-boot-0".to_string()),
+        script1 in arb_full_review_script("cr-boot-1".to_string()),
+        script2 in arb_full_review_script("cr-boot-2".to_string()),
+        prior_fracs in prop::collection::vec(0u32..=100, 3),
+    ) {
+        let all: Vec<(String, Vec<String>, u32)> = vec![
+            ("cr-boot-0".to_string(), script0, prior_fracs[0]),
+            ("cr-boot-1".to_string(), script1, prior_fracs[1]),
+            ("cr-boot-2".to_string(), script2, prior_fracs[2]),
+        ];
+        let reviews: Vec<(String, Vec<String>, u32)> = all.into_iter().take(review_count).collect();
+
+        let dir = tempdir().unwrap();
+        let seal_root = dir.path();
+        let db = ProjectionDb::open_in_memory().unwrap();
+        db.init_schema().unwrap();
+
+        // Step 1: write only a prefix of each review's log (a random cut
+        // point, possibly 0 or the full length) and sync — this becomes the
+        // stale/partial/complete prior projection P.
+        for (review_id, lines, frac) in &reviews {
+            let cut = lines.len() * (*frac as usize) / 100;
+            write_review_log(seal_root, review_id, &lines[..cut]);
+        }
+        sync_from_review_logs(&db, seal_root).unwrap();
+
+        // The bootstrap path only engages when the projection already has
+        // data; skip cases where the prefix sync produced nothing at all.
+        let projection_has_data: bool = db
+            .conn()
+            .query_row("SELECT COUNT(*) > 0 FROM reviews", [], |row| row.get(0))
+            .unwrap();
+        prop_assume!(projection_has_data);
+
+        // Step 2: append the rest of each log — P is now stale (or, in the
+        // frac=100 case, already fully caught up) relative to what's on disk.
+        for (review_id, lines, frac) in &reviews {
+            let cut = lines.len() * (*frac as usize) / 100;
+            if cut < lines.len() {
+                let log = ReviewLog::new(seal_root, review_id).unwrap();
+                let mut content = String::new();
+                for line in &lines[cut..] {
+                    content.push_str(line);
+                    content.push('\n');
+                }
+                use std::io::Write as _;
+                let mut file = std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(log.path())
+                    .unwrap();
+                file.write_all(content.as_bytes()).unwrap();
+                file.flush().unwrap();
+            }
+        }
+
+        // Step 3: simulate the upgrade (empty review_file_state) and sync.
+        db.conn().execute("DELETE FROM review_file_state", []).unwrap();
+        let report = sync_from_review_logs(&db, seal_root).unwrap();
+        prop_assert!(
+            report.anomalies.is_empty(),
+            "unexpected anomalies after bootstrap: {:?}", report.anomalies
+        );
+
+        // Step 4: a fresh projection of the same on-disk logs (L), synced
+        // once into an empty database, is the ground truth.
+        let fresh_db = ProjectionDb::open_in_memory().unwrap();
+        fresh_db.init_schema().unwrap();
+        sync_from_review_logs(&fresh_db, seal_root).unwrap();
+
+        for (review_id, lines, _) in &reviews {
+            if lines.is_empty() {
+                continue;
+            }
+            let bootstrapped_snapshot = snapshot_review(&db, review_id);
+            let fresh_snapshot = snapshot_review(&fresh_db, review_id);
+            prop_assert_eq!(
+                bootstrapped_snapshot, fresh_snapshot,
+                "bootstrap-then-sync projection for {} diverged from a fresh sync of the same logs",
+                review_id
+            );
+        }
+    }
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(96))]
 
