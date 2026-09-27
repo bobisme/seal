@@ -1325,6 +1325,110 @@ fn sync_grew_file(
     Ok(())
 }
 
+/// Atomically reset one review's projected rows and replay its log (for
+/// `--accept-regression`).
+///
+/// Replaying a full log on top of existing rows is not idempotent (e.g.
+/// `ReviewRetargeted` guards on the old anchor), so every row owned by the
+/// review — the review itself, reviewers, votes, its threads and their
+/// comments, and its file state — is deleted before the replay. Rows of other
+/// reviews are never touched. The reset and replay run in one savepoint: on
+/// any failure the projection is left exactly as it was.
+///
+/// If the log file does not exist, only the stored file state is dropped and
+/// the projected rows are preserved. If the log has no `ReviewCreated` for the
+/// review, nothing is changed and an error is returned.
+///
+/// Returns the number of events applied.
+pub fn rebuild_review_from_log(
+    db: &ProjectionDb,
+    seal_root: &Path,
+    review_id: &str,
+) -> Result<usize> {
+    let log = ReviewLog::new(seal_root, review_id)?;
+    if !log.path().exists() {
+        db.delete_review_file_state(review_id)?;
+        return Ok(0);
+    }
+
+    let events = log
+        .read_all()
+        .with_context(|| format!("Failed to read review log for {review_id}"))?;
+    let (events, _orphaned) = filter_orphaned_events_for_repo(events, Some(seal_root));
+    let has_review_created = events
+        .iter()
+        .any(|env| matches!(&env.event, Event::ReviewCreated(e) if e.review_id == review_id));
+    if !has_review_created {
+        anyhow::bail!(
+            "review log for {review_id} has no ReviewCreated event; projection left unchanged"
+        );
+    }
+
+    let line_count = log.total_lines()?;
+    let byte_count = log.byte_len()?;
+    let prefix_hash = log.prefix_hash(line_count)?.unwrap_or_default();
+
+    db.conn
+        .execute_batch("SAVEPOINT rebuild_review")
+        .context("Failed to create savepoint")?;
+
+    let result = (|| -> Result<()> {
+        db.conn.execute(
+            "DELETE FROM comments WHERE thread_id IN
+                (SELECT thread_id FROM threads WHERE review_id = ?1)",
+            params![review_id],
+        )?;
+        db.conn.execute(
+            "DELETE FROM threads WHERE review_id = ?1",
+            params![review_id],
+        )?;
+        db.conn.execute(
+            "DELETE FROM reviewer_votes WHERE review_id = ?1",
+            params![review_id],
+        )?;
+        db.conn.execute(
+            "DELETE FROM review_reviewers WHERE review_id = ?1",
+            params![review_id],
+        )?;
+        db.conn.execute(
+            "DELETE FROM reviews WHERE review_id = ?1",
+            params![review_id],
+        )?;
+        db.conn.execute(
+            "DELETE FROM review_file_state WHERE review_id = ?1",
+            params![review_id],
+        )?;
+
+        for event in &events {
+            apply_event_inner(&db.conn, event).with_context(|| {
+                format!(
+                    "Failed to replay {} for {review_id}",
+                    event_type_name(&event.event)
+                )
+            })?;
+        }
+
+        db.conn.execute(
+            "INSERT INTO review_file_state (review_id, line_count, byte_count, prefix_hash) VALUES (?, ?, ?, ?)",
+            params![review_id, line_count as i64, byte_count as i64, prefix_hash],
+        )?;
+        Ok(())
+    })();
+
+    if let Err(e) = result {
+        db.conn
+            .execute_batch("ROLLBACK TO SAVEPOINT rebuild_review; RELEASE SAVEPOINT rebuild_review")
+            .context("Failed to roll back review rebuild")?;
+        return Err(e);
+    }
+
+    db.conn
+        .execute_batch("RELEASE SAVEPOINT rebuild_review")
+        .context("Failed to release savepoint")?;
+
+    Ok(events.len())
+}
+
 /// Filter orphaned events, considering reviews already in the projection.
 ///
 /// For incremental sync (grew files), events may reference reviews that are
