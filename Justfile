@@ -17,6 +17,10 @@ clippy:
 test:
   cargo test --workspace
 
+# Run Kani proof harnesses (cfg(kani) modules). Requires cargo-kani.
+kani *ARGS:
+  cargo kani -p seal-core {{ARGS}}
+
 build:
   cargo build --release
 

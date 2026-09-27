@@ -48,11 +48,16 @@ opentelemetry-appender-tracing = "0.31"
 tracing-opentelemetry = "0.32"
 
 # Dev
+proptest = "1.7"
 tempfile = "3.24.0"
 
 # Internal
 seal-core = { path = "crates/seal-core", version = "0.29.0" }
 seal-tui = { path = "crates/seal-tui", version = "0.29.0" }
+
+[workspace.lints.rust]
+# Kani sets cfg(kani) when it builds proof harnesses.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
 
 [workspace.lints.clippy]
 pedantic = { level = "deny", priority = -1 }
