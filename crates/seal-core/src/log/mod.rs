@@ -1035,3 +1035,6 @@ mod tests {
         assert_eq!(fnv1a_hash(b"a"), 0xaf63_dc4c_8601_ec8c);
     }
 }
+
+#[cfg(test)]
+mod proptests;

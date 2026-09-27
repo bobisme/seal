@@ -912,7 +912,6 @@ fn filter_orphaned_events_for_repo(
 /// Stored state for a review file from the `review_file_state` table.
 struct StoredFileState {
     line_count: usize,
-    byte_count: u64,
     prefix_hash: String,
 }
 
@@ -943,7 +942,6 @@ pub fn sync_from_review_logs(db: &ProjectionDb, seal_root: &Path) -> Result<Sync
                     row.get::<_, String>(0)?,
                     StoredFileState {
                         line_count: row.get::<_, i64>(1)? as usize,
-                        byte_count: row.get::<_, i64>(2)? as u64,
                         prefix_hash: row.get::<_, String>(3)?,
                     },
                 ))
@@ -985,7 +983,6 @@ pub fn sync_from_review_logs(db: &ProjectionDb, seal_root: &Path) -> Result<Sync
                         review_id.clone(),
                         StoredFileState {
                             line_count,
-                            byte_count,
                             prefix_hash,
                         },
                     );
@@ -1015,18 +1012,15 @@ pub fn sync_from_review_logs(db: &ProjectionDb, seal_root: &Path) -> Result<Sync
             }
         };
 
-        // Get current file stats
-        let current_byte_count = match log.byte_len() {
-            Ok(b) => b,
-            Err(e) => {
-                report.anomalies.push(SyncAnomaly {
-                    review_id: review_id.clone(),
-                    kind: AnomalyKind::ParseError,
-                    detail: format!("Failed to stat file: {e}"),
-                });
-                continue;
-            }
-        };
+        // Confirm the file is still stat-able before doing further work.
+        if let Err(e) = log.byte_len() {
+            report.anomalies.push(SyncAnomaly {
+                review_id: review_id.clone(),
+                kind: AnomalyKind::ParseError,
+                detail: format!("Failed to stat file: {e}"),
+            });
+            continue;
+        }
 
         match stored_states.get(review_id.as_str()) {
             None => {
@@ -1034,13 +1028,14 @@ pub fn sync_from_review_logs(db: &ProjectionDb, seal_root: &Path) -> Result<Sync
                 sync_new_file(db, &log, review_id, seal_root, &mut report)?;
             }
             Some(stored) => {
-                if current_byte_count == stored.byte_count {
-                    // UNCHANGED: skip — cheap fast-path (no hashing needed)
-                    report.files_skipped += 1;
-                    continue;
-                }
-
-                // Byte count changed — need to inspect further
+                // NOTE: we deliberately do NOT fast-path on `current_byte_count ==
+                // stored.byte_count` here. A same-length content replacement (e.g.
+                // a single byte flip, or two lines of equal length swapped) leaves
+                // the total byte count unchanged, so trusting byte-count equality
+                // alone would silently accept tampered content — this is the same
+                // failure mode fixed for the v1 log by bd-oum, reintroduced here.
+                // We always fall through to the line-count/hash checks below,
+                // which are what actually detect tampering.
                 let current_line_count = match log.total_lines() {
                     Ok(n) => n,
                     Err(e) => {
@@ -3453,6 +3448,67 @@ mod tests {
                 Some("lgtm".to_string())
             );
         }
+    }
+
+    /// Regression (bn-2n88 proptest finding): `sync_from_review_logs` (the v2
+    /// per-review sync path) had its own copy of the bd-oum bug that the v1
+    /// path (`test_bd_oum_same_length_content_replacement`, above) had
+    /// already been fixed for.
+    ///
+    /// `sync_from_review_logs` short-circuited on `current_byte_count ==
+    /// stored.byte_count`, skipping the file with no hash check at all. A
+    /// same-length content replacement — e.g. a single in-place byte flip,
+    /// which by construction never changes the file's total byte count — was
+    /// therefore invisible: no anomaly, corrupted content silently kept.
+    ///
+    /// Minimized counterexample: one review, two events (`ReviewCreated`,
+    /// then a block vote with reason "Needs fixes"), synced once; then a
+    /// single word in the reason is replaced by another word of the exact
+    /// same byte length ("Needs fixes" -> "Xeeds fixes"). Total file byte
+    /// count is unchanged, but content is not. Before the fix, `sync_from_review_logs`
+    /// reported zero anomalies for this. After the fix (removing the
+    /// byte-count fast path so line-count/hash verification always runs),
+    /// a `HashMismatch` anomaly is reported.
+    #[test]
+    fn test_bd_oum_v2_same_byte_length_tamper_detected() {
+        let dir = tempdir().unwrap();
+        let seal_root = dir.path();
+        let db = ProjectionDb::open_in_memory().unwrap();
+        db.init_schema().unwrap();
+
+        let log = crate::log::ReviewLog::new(seal_root, "cr-probe").unwrap();
+        log.append(&make_review_created("cr-probe")).unwrap();
+        log.append(&make_block_vote("cr-probe", "reviewer-a", "Needs fixes"))
+            .unwrap();
+
+        let report1 = sync_from_review_logs(&db, seal_root).unwrap();
+        assert!(report1.anomalies.is_empty());
+        assert_eq!(
+            query_vote(&db, "cr-probe", "reviewer-a"),
+            Some("block".to_string())
+        );
+
+        // Same-byte-length, content-changing tamper: "Needs fixes" -> "Xeeds fixes".
+        let path = log.path();
+        let content = std::fs::read_to_string(&path).unwrap();
+        let tampered = content.replacen("Needs fixes", "Xeeds fixes", 1);
+        assert_eq!(
+            content.len(),
+            tampered.len(),
+            "tamper must preserve total byte length to exercise the fast path"
+        );
+        assert_ne!(content, tampered);
+        write_raw(&path, &tampered);
+
+        let report2 = sync_from_review_logs(&db, seal_root).unwrap();
+        assert!(
+            report2
+                .anomalies
+                .iter()
+                .any(|a| a.review_id == "cr-probe" && a.kind == AnomalyKind::HashMismatch),
+            "same-byte-length tamper must be reported as a HashMismatch anomaly, got: {:?}",
+            report2.anomalies
+        );
     }
 
     /// bd-oum: Verify that the hash is backfilled on existing databases
