@@ -34,7 +34,7 @@ use crate::theme::Theme;
 pub use analysis::{diff_change_counts, map_threads_to_diff};
 
 use analysis::{build_thread_ranges, line_in_thread_ranges};
-use comments::{comment_block_rows, emit_comment_block};
+use comments::{comment_block_rows, emit_comment_block, emit_outdated_preview};
 use context::{
     build_context_items, calculate_context_ranges, emit_orphaned_context_section,
     emit_remaining_orphaned_comments, group_context_ranges_by_hunks, render_context_item_block,
@@ -649,6 +649,15 @@ fn render_file_with_diff(
             sctx.thread_positions
                 .borrow_mut()
                 .insert(thread.thread_id.clone(), cursor.stream_row);
+            // Outdated threads with a preview (see `core_client::
+            // build_outdated_previews`) get a code preview at the anchor
+            // commit before the comment block; unknown threads (no preview)
+            // fall straight through to the plain comment block, as before.
+            if thread.outdated {
+                if let Some(preview) = &thread.outdated_preview {
+                    emit_outdated_preview(cursor, area, preview, sctx.wrap);
+                }
+            }
             if let Some(comments) = sctx.all_comments.get(&thread.thread_id) {
                 let rows = comment_block_rows(thread, comments, area);
                 let is_cursor = cursor.is_cursor_at(rows);
@@ -675,11 +684,33 @@ fn render_file_content_no_diff(
     file_highlights: &[Vec<HighlightSpan>],
     sctx: &StreamRenderCtx<'_>,
 ) {
+    // Outdated threads (modified/deleted/unknown anchor) have no reliable
+    // line in this content window to point at — their stored line is
+    // wherever it used to be, which may now hold unrelated code in the
+    // target. Only placeable (unchanged/shifted) threads are windowed and
+    // anchored inline below; outdated threads always render afterward, via
+    // their anchor-commit preview (when loaded) and a plain marked comment
+    // block — the same shape as `render_file_with_diff`'s `plain_threads`.
+    let placeable_threads: Vec<&ThreadSummary> = file_threads
+        .iter()
+        .filter(|t| !t.outdated)
+        .copied()
+        .collect();
+    let outdated_threads: Vec<&ThreadSummary> = file_threads
+        .iter()
+        .filter(|t| t.outdated)
+        .copied()
+        .collect();
+
     let line_area = diff_margin_area(area);
     let start_line = content.start_line;
-    let thread_ranges = build_thread_ranges(file_threads);
-    let display_items =
-        build_context_items(content.lines.as_slice(), file_threads, &[], start_line);
+    let thread_ranges = build_thread_ranges(&placeable_threads);
+    let display_items = build_context_items(
+        content.lines.as_slice(),
+        &placeable_threads,
+        &[],
+        start_line,
+    );
     for item in display_items {
         let show_thread_bar = match &item {
             DisplayItem::Line { line_num, .. } => {
@@ -755,7 +786,7 @@ fn render_file_content_no_diff(
         }
 
         if let DisplayItem::Line { line_num, .. } = &item {
-            for thread in file_threads
+            for thread in placeable_threads
                 .iter()
                 .filter(|t| t.effective_end() == *line_num)
             {
@@ -777,6 +808,33 @@ fn render_file_content_no_diff(
                         sctx.highlighter,
                     );
                 }
+            }
+        }
+    }
+
+    if !outdated_threads.is_empty() {
+        let mut outdated_sorted = outdated_threads;
+        outdated_sorted.sort_by_key(|t| t.effective_start());
+        for thread in &outdated_sorted {
+            sctx.thread_positions
+                .borrow_mut()
+                .insert(thread.thread_id.clone(), cursor.stream_row);
+            if let Some(preview) = &thread.outdated_preview {
+                emit_outdated_preview(cursor, area, preview, sctx.wrap);
+            }
+            if let Some(comments) = sctx.all_comments.get(&thread.thread_id) {
+                let rows = comment_block_rows(thread, comments, area);
+                let is_cursor = cursor.is_cursor_at(rows);
+                let hl = is_cursor || cursor.is_selected_at(rows);
+                emit_comment_block(
+                    cursor,
+                    area,
+                    thread,
+                    comments,
+                    hl,
+                    is_cursor,
+                    sctx.highlighter,
+                );
             }
         }
     }
@@ -1430,6 +1488,288 @@ pub fn render_diff_stream(buffer: &mut OptimizedBuffer, area: Rect, params: &Dif
             area.width,
             remaining_height,
             theme.background,
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::{Comment, OutdatedPreview};
+    use crate::model::{DiffViewMode, FileCacheEntry, FileEntry};
+    use crate::render_backend::CellContent;
+    use crate::syntax::Highlighter;
+    use crate::theme::Theme;
+    use std::collections::HashMap;
+
+    fn buffer_text(buffer: &OptimizedBuffer) -> String {
+        let mut out = String::new();
+        for y in 0..buffer.height() {
+            for x in 0..buffer.width() {
+                let ch = match buffer.get(x, y).map(|c| c.content) {
+                    Some(CellContent::Char(c)) => c,
+                    _ => ' ',
+                };
+                out.push(ch);
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    fn outdated_thread(
+        thread_id: &str,
+        selection_start: i64,
+        drift_status: &str,
+        preview: Option<OutdatedPreview>,
+    ) -> ThreadSummary {
+        ThreadSummary {
+            thread_id: thread_id.to_string(),
+            file_path: "f.txt".to_string(),
+            selection_start,
+            selection_end: None,
+            status: "open".to_string(),
+            comment_count: 0,
+            current_selection_start: None,
+            current_selection_end: None,
+            drift_status: drift_status.to_string(),
+            outdated: true,
+            outdated_preview: preview,
+        }
+    }
+
+    fn preview(commit: &str, start_line: i64, lines: &[&str]) -> OutdatedPreview {
+        let anchor_end = start_line + i64::try_from(lines.len().saturating_sub(1)).unwrap_or(0);
+        OutdatedPreview {
+            commit: commit.to_string(),
+            start_line,
+            lines: lines.iter().map(|s| (*s).to_string()).collect(),
+            anchor_start: start_line,
+            anchor_end,
+        }
+    }
+
+    /// Renders a file with three outdated threads (modified, deleted,
+    /// unknown) and checks that only the two with a preview get a code
+    /// preview labelled with their anchor commit, while the unknown one
+    /// (no preview) renders no such block at all — it still falls through
+    /// to the plain comment block (not asserted here directly, since these
+    /// threads carry no comments; `mod::render_file_with_diff`'s
+    /// `plain_threads` loop is what would draw it).
+    #[test]
+    fn outdated_threads_render_anchor_commit_preview_and_skip_unknown() {
+        let diff = ParsedDiff::parse("@@ -1,2 +1,2 @@\n context 1\n context 2\n");
+        let file_cache: HashMap<String, FileCacheEntry> = HashMap::from([(
+            "f.txt".to_string(),
+            FileCacheEntry {
+                diff: Some(diff),
+                file_content: None,
+                highlighted_lines: Vec::new(),
+                file_highlighted_lines: Vec::new(),
+            },
+        )]);
+        let files = vec![FileEntry {
+            path: "f.txt".to_string(),
+            open_threads: 0,
+            resolved_threads: 0,
+        }];
+
+        let modified = outdated_thread(
+            "th-mod",
+            50,
+            "modified",
+            Some(preview(
+                "abcdef1234567890",
+                48,
+                &["ctx before", "old line fifty", "ctx after"],
+            )),
+        );
+        let deleted = outdated_thread(
+            "th-del",
+            10,
+            "deleted",
+            Some(preview("1111222233334444", 9, &["deleted line ten"])),
+        );
+        let unknown = outdated_thread("th-unk", 5, "unknown", None);
+        let threads = vec![modified, deleted, unknown];
+
+        let all_comments: HashMap<String, Vec<Comment>> = HashMap::new();
+        let thread_positions = std::cell::RefCell::new(HashMap::new());
+        let line_map = std::cell::RefCell::new(HashMap::new());
+        let cursor_stops = std::cell::RefCell::new(Vec::new());
+        let max_stream_row = std::cell::Cell::new(0);
+        let theme = Theme::default();
+        let highlighter = Highlighter::new();
+
+        let mut buffer = OptimizedBuffer::new(80, 200);
+        let area = Rect::new(0, 0, 80, 200);
+
+        render_diff_stream(
+            &mut buffer,
+            area,
+            &DiffStreamParams {
+                files: &files,
+                file_cache: &file_cache,
+                threads: &threads,
+                all_comments: &all_comments,
+                scroll: 0,
+                diff_cursor: usize::MAX,
+                theme: &theme,
+                highlighter: &highlighter,
+                view_mode: DiffViewMode::Unified,
+                wrap: false,
+                thread_positions: &thread_positions,
+                max_stream_row: &max_stream_row,
+                description: None,
+                selection: None,
+                line_map: &line_map,
+                cursor_stops: &cursor_stops,
+            },
+        );
+
+        let text = buffer_text(&buffer);
+
+        assert!(
+            text.contains("code as commented, at abcdef123456"),
+            "modified thread must show its anchor-commit label:\n{text}"
+        );
+        assert!(
+            text.contains("old line fifty"),
+            "modified thread must show its anchor-commit content:\n{text}"
+        );
+        assert!(
+            text.contains("code as commented, at 111122223333"),
+            "deleted thread must show its anchor-commit label:\n{text}"
+        );
+        assert!(
+            text.contains("deleted line ten"),
+            "deleted thread must show its anchor-commit content:\n{text}"
+        );
+
+        let preview_count = text.matches("code as commented, at").count();
+        assert_eq!(
+            preview_count, 2,
+            "unknown thread (no preview) must not get a code-as-commented \
+             label:\n{text}"
+        );
+    }
+
+    /// A file with no diff entry (`FileCacheEntry::diff` is `None`, only
+    /// `file_content` is populated — e.g. a file untouched by the review's
+    /// base..target diff but still holding threads), with one shifted
+    /// thread and one modified thread. The shifted thread keeps its mapped
+    /// placement in the windowed content; the modified thread must never
+    /// be anchored at its stored line (which may now hold unrelated code
+    /// in the target) — it gets its anchor-commit preview instead, and is
+    /// positioned after all windowed content, not interleaved into it.
+    #[test]
+    fn no_diff_view_never_anchors_outdated_threads_to_their_stored_line() {
+        let lines: Vec<String> = (1..=20).map(|i| format!("marker{i:03}")).collect();
+        let file_cache: HashMap<String, FileCacheEntry> = HashMap::from([(
+            "f.txt".to_string(),
+            FileCacheEntry {
+                diff: None,
+                file_content: Some(crate::model::FileContent {
+                    lines,
+                    start_line: 1,
+                }),
+                highlighted_lines: Vec::new(),
+                file_highlighted_lines: Vec::new(),
+            },
+        )]);
+        let files = vec![FileEntry {
+            path: "f.txt".to_string(),
+            open_threads: 0,
+            resolved_threads: 0,
+        }];
+
+        // Stored far from its current line; only the mapped line (12)
+        // should end up in the displayed (±5 context) window.
+        let shifted = ThreadSummary {
+            thread_id: "th-shift".to_string(),
+            file_path: "f.txt".to_string(),
+            selection_start: 15,
+            selection_end: None,
+            status: "open".to_string(),
+            comment_count: 0,
+            current_selection_start: Some(12),
+            current_selection_end: None,
+            drift_status: "shifted(-3)".to_string(),
+            outdated: false,
+            outdated_preview: None,
+        };
+        // Stored at line 10, which *does* fall inside the shifted thread's
+        // displayed window (7-17) — the case that used to leak a stale
+        // inline placement.
+        let modified = outdated_thread(
+            "th-mod",
+            10,
+            "modified",
+            Some(preview("abcdef1234567890", 9, &["old line ten content"])),
+        );
+        let threads = vec![shifted, modified];
+
+        let all_comments: HashMap<String, Vec<Comment>> = HashMap::new();
+        let thread_positions = std::cell::RefCell::new(HashMap::new());
+        let line_map = std::cell::RefCell::new(HashMap::new());
+        let cursor_stops = std::cell::RefCell::new(Vec::new());
+        let max_stream_row = std::cell::Cell::new(0);
+        let theme = Theme::default();
+        let highlighter = Highlighter::new();
+
+        let mut buffer = OptimizedBuffer::new(80, 200);
+        let area = Rect::new(0, 0, 80, 200);
+
+        render_diff_stream(
+            &mut buffer,
+            area,
+            &DiffStreamParams {
+                files: &files,
+                file_cache: &file_cache,
+                threads: &threads,
+                all_comments: &all_comments,
+                scroll: 0,
+                diff_cursor: usize::MAX,
+                theme: &theme,
+                highlighter: &highlighter,
+                view_mode: DiffViewMode::Unified,
+                wrap: false,
+                thread_positions: &thread_positions,
+                max_stream_row: &max_stream_row,
+                description: None,
+                selection: None,
+                line_map: &line_map,
+                cursor_stops: &cursor_stops,
+            },
+        );
+
+        let text = buffer_text(&buffer);
+        assert!(
+            text.contains("marker012"),
+            "the shifted thread's mapped line must be in the displayed window:\n{text}"
+        );
+        assert!(
+            text.contains("code as commented, at abcdef123456"),
+            "the modified thread must show its anchor-commit label:\n{text}"
+        );
+        assert!(
+            text.contains("old line ten content"),
+            "the modified thread must show its anchor-commit content, not \
+             whatever the target holds at its stored line:\n{text}"
+        );
+
+        let positions = thread_positions.borrow();
+        let shift_row = *positions
+            .get("th-shift")
+            .expect("shifted thread must be positioned");
+        let mod_row = *positions
+            .get("th-mod")
+            .expect("modified thread must be positioned");
+        assert!(
+            mod_row > shift_row,
+            "the modified (outdated) thread must render after all windowed \
+             placeable content, never interleaved at its stored line \
+             (th-shift @ {shift_row}, th-mod @ {mod_row})"
         );
     }
 }

@@ -4,19 +4,22 @@ use std::fmt::Write as _;
 
 use crate::render_backend::{buffer_draw_text, buffer_fill_rect, color_lerp, Style};
 
-use crate::db::ThreadSummary;
-use crate::layout::BLOCK_PADDING;
+use crate::db::{OutdatedPreview, ThreadSummary};
+use crate::layout::{BLOCK_PADDING, SBS_LINE_NUM_WIDTH};
 use crate::markdown::{
     draw_markdown_content, markdown_line_bg, render_markdown, render_markdown_with_highlighter,
     MarkdownContent, MarkdownStyle,
 };
-use crate::syntax::Highlighter;
+use crate::syntax::{HighlightSpan, Highlighter};
 use crate::view::components::Rect;
 
+use super::context::{render_context_item_block, render_context_line_wrapped_row};
 use super::helpers::{
-    comment_block_area, comment_content_area, draw_plain_line_with_right, PlainLineContent,
+    comment_block_area, comment_content_area, draw_diff_base_line, draw_plain_line_with_right,
+    orphaned_context_width, orphaned_context_x, PlainLineContent,
 };
-use super::StreamCursor;
+use super::text_util::wrap_content;
+use super::{DisplayItem, LineRenderCtx, StreamCursor};
 
 #[derive(Clone)]
 pub(super) enum CommentLineKind {
@@ -114,6 +117,99 @@ fn build_comment_lines(
     }
 
     content_lines
+}
+
+/// Shorten a commit hash for display, matching the CLI's `short_commit`
+/// (`crates/seal-cli/src/cli/commands/reviews.rs`) so the label reads the
+/// same in both places.
+fn short_commit(commit: &str) -> &str {
+    if commit.len() > 12 && commit.chars().all(|c| c.is_ascii_hexdigit()) {
+        &commit[..12]
+    } else {
+        commit
+    }
+}
+
+/// Render the small code preview for an outdated (modified/deleted) thread,
+/// read from its own anchor commit at review load time (see
+/// `core_client::build_outdated_previews`). Labelled "code as commented, at
+/// `<commit>`", matching the CLI's `seal review --context` output. Reuses
+/// the orphaned-context line rendering (`view::diff::context`) so the
+/// preview looks like any other code preview in the pane — just plain text,
+/// since this is a different commit's content and has no syntax highlights
+/// precomputed for it.
+///
+/// Non-interactive: like the description block, its rows are not
+/// registered as cursor stops — this is a read-only historical snapshot,
+/// not a place to comment.
+///
+/// Row shape (one label row + one row per preview line, more under
+/// wrapping) is mirrored by `stream::outdated_preview_row_count` for the
+/// precomputed scroll layout; keep the two in sync.
+pub(super) fn emit_outdated_preview(
+    cursor: &mut StreamCursor<'_>,
+    area: Rect,
+    preview: &OutdatedPreview,
+    wrap: bool,
+) {
+    let label = format!("code as commented, at {}", short_commit(&preview.commit));
+    cursor.emit(|buf, y, theme| {
+        let bg = theme.diff.context_bg;
+        draw_diff_base_line(buf, area, y, bg);
+        buffer_draw_text(
+            buf,
+            orphaned_context_x(area),
+            y,
+            &label,
+            Style::fg(theme.warning).with_bg(bg),
+        );
+    });
+
+    let no_highlights: &[Vec<HighlightSpan>] = &[];
+    for (offset, content) in preview.lines.iter().enumerate() {
+        let line_num = preview.start_line + i64::try_from(offset).unwrap_or(i64::MAX);
+        if wrap {
+            let cw = orphaned_context_width(area).saturating_sub(SBS_LINE_NUM_WIDTH) as usize;
+            let wrapped = wrap_content(None, content, cw);
+            let rows = wrapped.len().max(1);
+            cursor.emit_rows(rows, |buf, y, theme, row| {
+                render_context_line_wrapped_row(
+                    buf,
+                    y,
+                    line_num,
+                    theme,
+                    &LineRenderCtx {
+                        area,
+                        anchor: None,
+                        show_thread_bar: false,
+                        is_cursor: false,
+                        is_selected: false,
+                    },
+                    &wrapped,
+                    row,
+                );
+            });
+        } else {
+            let item = DisplayItem::Line {
+                line_num,
+                content: content.clone(),
+            };
+            cursor.emit(|buf, y, theme| {
+                render_context_item_block(
+                    buf,
+                    area,
+                    y,
+                    &item,
+                    theme,
+                    false,
+                    no_highlights,
+                    false,
+                    false,
+                    preview.start_line,
+                );
+            });
+        }
+    }
 }
 
 /// Compute the total row height of a comment block (for cursor range checks).
@@ -327,6 +423,7 @@ mod tests {
             current_selection_end: None,
             drift_status: "unchanged".to_string(),
             outdated: false,
+            outdated_preview: None,
         }
     }
 

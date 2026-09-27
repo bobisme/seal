@@ -70,6 +70,37 @@ pub struct ThreadSummary {
     /// outdated, never hidden or placed at a guessed line.
     #[serde(default)]
     pub outdated: bool,
+    /// Small code preview for this thread, read from its own anchor commit
+    /// rather than the review's current target. Only ever set for a
+    /// `modified`/`deleted` thread (never `unknown`, which has no commit
+    /// that can be trusted to read), and only when the read succeeded — see
+    /// [`OutdatedPreview`]. `None` means: render the plain comment block,
+    /// same as before this field existed.
+    #[serde(default)]
+    pub outdated_preview: Option<OutdatedPreview>,
+}
+
+/// Code preview for an outdated thread, read from the thread's own anchor
+/// commit (`commit_hash`) once at review load — mirrors the CLI's
+/// `context_source` (`crates/seal-cli/src/cli/commands/reviews.rs`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OutdatedPreview {
+    /// Full commit hash the preview was read from (the thread's anchor
+    /// commit, i.e. `commit_hash` on the underlying core thread).
+    pub commit: String,
+    /// 1-based line number of `lines[0]`.
+    pub start_line: i64,
+    /// The text lines in the window: the anchored range plus a little
+    /// context, already clamped to a small size regardless of how large
+    /// the stored anchor range claims to be (see `MAX_PREVIEW_ANCHOR_LINES`
+    /// in `core_client`).
+    pub lines: Vec<String>,
+    /// First line of the anchored range within `lines` (absolute line
+    /// number, same numbering as `start_line`).
+    pub anchor_start: i64,
+    /// Last line of the anchored range, inclusive. May be less than the
+    /// thread's own stored/mapped end when the range was clamped.
+    pub anchor_end: i64,
 }
 
 impl ThreadSummary {

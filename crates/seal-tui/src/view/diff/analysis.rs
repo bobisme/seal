@@ -152,6 +152,7 @@ mod tests {
             current_selection_end: current_start,
             drift_status: drift_status.to_string(),
             outdated,
+            outdated_preview: None,
         }
     }
 

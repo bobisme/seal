@@ -122,7 +122,23 @@ pub fn compute_stream_layout(params: &StreamLayoutParams<'_>) -> StreamLayout {
             let diff_lines = entry.diff.as_ref().map_or_else(
                 || {
                     entry.file_content.as_ref().map_or(0, |content| {
-                        context_display_count(
+                        // Outdated threads never get a windowed line in this
+                        // no-diff view — mirrors the render-side split in
+                        // `view::diff::mod::render_file_content_no_diff`, or
+                        // the computed row count and the actual render
+                        // disagree.
+                        let placeable_threads: Vec<&ThreadSummary> = file_threads
+                            .iter()
+                            .filter(|t| !t.outdated)
+                            .copied()
+                            .collect();
+                        let outdated_threads: Vec<&ThreadSummary> = file_threads
+                            .iter()
+                            .filter(|t| t.outdated)
+                            .copied()
+                            .collect();
+
+                        let mut count = context_display_count(
                             content.lines.as_slice(),
                             content.start_line,
                             threads,
@@ -132,10 +148,20 @@ pub fn compute_stream_layout(params: &StreamLayoutParams<'_>) -> StreamLayout {
                         ) + all_context_extra_lines(
                             content.start_line,
                             content.lines.len(),
-                            &file_threads,
+                            &placeable_threads,
                             all_comments,
                             content_width,
-                        )
+                        );
+
+                        for thread in &outdated_threads {
+                            if let Some(preview) = &thread.outdated_preview {
+                                count += outdated_preview_row_count(preview, wrap, content_width);
+                            }
+                        }
+                        count +=
+                            threads_comment_height(&outdated_threads, all_comments, content_width);
+
+                        count
                     })
                 },
                 |diff| {
@@ -161,6 +187,15 @@ pub fn compute_stream_layout(params: &StreamLayoutParams<'_>) -> StreamLayout {
                         .filter(|t| !t.outdated)
                         .copied()
                         .collect();
+                    // Outdated orphans with an anchor-commit preview (see
+                    // `core_client::build_outdated_previews`) get their own
+                    // small preview block — mirrors
+                    // `view::diff::comments::emit_outdated_preview`.
+                    let outdated_previews: Vec<&crate::db::OutdatedPreview> = orphaned_threads
+                        .iter()
+                        .filter(|t| t.outdated)
+                        .filter_map(|t| t.outdated_preview.as_ref())
+                        .collect();
 
                     let mut count = diff_line_count_for_view(diff, view_mode, wrap, content_width)
                         + threads_comment_height(&anchored_threads, all_comments, content_width);
@@ -178,6 +213,9 @@ pub fn compute_stream_layout(params: &StreamLayoutParams<'_>) -> StreamLayout {
                                     content_width,
                                 );
                             }
+                        }
+                        for preview in &outdated_previews {
+                            count += outdated_preview_row_count(preview, wrap, content_width);
                         }
                         count +=
                             threads_comment_height(&orphaned_threads, all_comments, content_width);
@@ -353,6 +391,10 @@ fn comment_block_height(comments: &[Comment], content_width: u32) -> usize {
     block_height(content_lines).saturating_sub(BLOCK_MARGIN)
 }
 
+/// Row count for the placeable (unchanged/shifted) threads' windowed
+/// context in a no-diff file view. Outdated threads never get a windowed
+/// line here — see `view::diff::mod::render_file_content_no_diff`; their
+/// rows are counted separately by the caller.
 fn context_display_count(
     lines: &[String],
     start_line: i64,
@@ -364,7 +406,10 @@ fn context_display_count(
     let mut ranges = Vec::new();
     #[allow(clippy::cast_possible_wrap)]
     let end_line = start_line + lines.len() as i64 - 1;
-    for thread in threads.iter().filter(|t| t.file_path == file_path) {
+    for thread in threads
+        .iter()
+        .filter(|t| t.file_path == file_path && !t.outdated)
+    {
         let (eff_start, eff_end) = thread.effective_selection();
         let thread_end = eff_end.unwrap_or(eff_start);
         let start = (eff_start - layout::CONTEXT_LINES).max(start_line);
@@ -513,6 +558,37 @@ fn orphaned_context_display_count(
     count
 }
 
+/// Wrapping width for an outdated thread's code preview lines. Must match
+/// `orphaned_context_width(area).saturating_sub(SBS_LINE_NUM_WIDTH)` in
+/// `view::diff::comments::emit_outdated_preview` — `content_width` here is
+/// the same pane width passed as `area.width` to that renderer.
+const fn outdated_preview_wrap_width(content_width: u32) -> usize {
+    content_width
+        .saturating_sub(layout::ORPHANED_CONTEXT_LEFT_PAD)
+        .saturating_sub(layout::SBS_LINE_NUM_WIDTH) as usize
+}
+
+/// Row count for an outdated thread's code preview block (one label row
+/// plus one row per preview line, more under wrapping). Mirrors
+/// `view::diff::comments::emit_outdated_preview` so the precomputed stream
+/// layout agrees with what actually renders.
+fn outdated_preview_row_count(
+    preview: &crate::db::OutdatedPreview,
+    wrap: bool,
+    content_width: u32,
+) -> usize {
+    let mut rows = 1; // label row: "code as commented, at <commit>"
+    if wrap {
+        let max_width = outdated_preview_wrap_width(content_width);
+        for line in &preview.lines {
+            rows += wrap_line_count(line, max_width);
+        }
+    } else {
+        rows += preview.lines.len();
+    }
+    rows
+}
+
 /// Count comment block heights for a set of threads.
 fn threads_comment_height(
     threads: &[&ThreadSummary],
@@ -567,6 +643,7 @@ mod tests {
             current_selection_end: end,
             drift_status: "unchanged".to_string(),
             outdated: false,
+            outdated_preview: None,
         }
     }
 
