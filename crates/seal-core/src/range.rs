@@ -109,8 +109,9 @@ pub enum StaleReason {
     /// The approval names no commit, so nothing can be checked against it.
     /// Applies to reviews approved before approvals recorded a commit.
     NoApprovedCommit,
-    /// Commits landed on top of the approved commit, and together they change
-    /// something other than review data under `.seal/`.
+    /// The target differs from the approved commit in something other than
+    /// review data under `.seal/`: commits landed on top of it, it was
+    /// rewritten, or it cannot be compared (unrelated or unresolvable).
     CommitsAdded,
 }
 
@@ -127,14 +128,19 @@ pub struct ApprovalCoverage {
     /// Exemption is judged on the net tree change of the whole range (see
     /// [`crate::approval_exempt`]), not commit by commit. So this is `0` when
     /// the range only records review activity under `.seal/`, and the full
-    /// commit count of the range when it changes anything else. `None` when
-    /// the commits cannot be counted or the two commits are unrelated.
+    /// commit count of the range when it changes anything else. When the
+    /// approved commit is not an ancestor of the target (a rewrite or an
+    /// unrelated history), this is `0` if the trees differ only in exempt
+    /// ways and `None` otherwise. Also `None` when the commits cannot be
+    /// counted or the approval records no commit.
     pub uncovered_commits: Option<usize>,
     /// Commits in `approved_commit..current_target` that were ignored because
     /// the range only records review activity under `.seal/`.
     ///
-    /// `Some(0)` when there is nothing to ignore or the approval is stale.
-    /// `None` when the range has no meaningful count.
+    /// `Some(0)` when there is nothing to ignore or the approval is stale on
+    /// a descendant target. `None` when the range has no meaningful count:
+    /// the approved commit is not an ancestor of the target (fresh or stale),
+    /// or the approval records no commit.
     pub exempt_commits: Option<usize>,
     /// Set when the approval does not cover `current_target`.
     pub stale_reason: Option<StaleReason>,
@@ -160,9 +166,12 @@ impl ApprovalCoverage {
 /// stale; [`crate::approval_exempt`] states the exact rule. Without this,
 /// committing the review log after the LGTM would always stale the LGTM.
 ///
-/// Commits that are not descendants of the approved commit do not count.
-/// A rewrite or an unrelated branch leaves the two commits unrelated, and
-/// counting that distance would report a meaningless number.
+/// When the target is not a descendant of the approved commit (a rewrite of
+/// the approved commit, or an unrelated branch), the same tree comparison
+/// decides. A rewrite that only adds review activity under `.seal/` stays
+/// fresh; anything else, including an approved commit that no longer
+/// resolves, is stale. No commit count is reported for such a pair, since
+/// the distance between unrelated commits means nothing.
 #[must_use]
 pub fn approval_coverage(scm: &dyn ScmRepo, review: &ReviewDetail) -> Option<ApprovalCoverage> {
     if review.status != "approved" {
@@ -181,6 +190,20 @@ pub fn approval_coverage(scm: &dyn ScmRepo, review: &ReviewDetail) -> Option<App
         });
     };
 
+    // The approval must name a commit id, not a revision expression. A
+    // symbolic name such as `HEAD` or `@` would resolve to the current target
+    // and compare the target with itself. Such an approval, or one that no
+    // longer resolves, is stale.
+    if scm.commit_for_anchor(&approved_commit).ok().as_deref() != Some(approved_commit.as_str()) {
+        return Some(ApprovalCoverage {
+            approved_commit: Some(approved_commit),
+            current_target,
+            uncovered_commits: None,
+            exempt_commits: None,
+            stale_reason: Some(StaleReason::CommitsAdded),
+        });
+    }
+
     if approved_commit == current_target {
         return Some(ApprovalCoverage {
             approved_commit: Some(approved_commit),
@@ -197,6 +220,23 @@ pub fn approval_coverage(scm: &dyn ScmRepo, review: &ReviewDetail) -> Option<App
         .unwrap_or(false);
 
     if !is_descendant {
+        // A rewrite of the approved commit (jj amending the review log into
+        // the approved change, `git commit --amend`) or an unrelated history.
+        // The exemption rule compares trees, not history, so it still
+        // decides: if the two trees differ only in exempt `.seal/` changes,
+        // the code that merges is the code that was approved. A commit that
+        // does not resolve, or any other failure, makes the check false.
+        // A commit count between unrelated commits means nothing, so both
+        // counts stay unknown except that nothing is uncovered when fresh.
+        if range_is_exempt(scm, &approved_commit, &current_target) {
+            return Some(ApprovalCoverage {
+                approved_commit: Some(approved_commit),
+                current_target,
+                uncovered_commits: Some(0),
+                exempt_commits: None,
+                stale_reason: None,
+            });
+        }
         return Some(ApprovalCoverage {
             approved_commit: Some(approved_commit),
             current_target,
@@ -725,6 +765,222 @@ mod tests {
             write(root, "src/lib.rs", "pub fn f() {}\n");
             commit_all(root, "revert");
             assert_fresh(&scm, &a, 2);
+        }
+
+        // ---- The approved commit is no longer an ancestor of the target
+        // ---- (bn-3rk0). The tree comparison still decides.
+
+        /// Fresh although `a` is not an ancestor: the count of an unrelated
+        /// range is meaningless, so `exempt_commits` is `None`.
+        fn assert_fresh_unrelated(scm: &GitRepo, a: &str) {
+            let c = coverage(scm, a);
+            assert!(!c.is_stale(), "expected fresh, got {c:?}");
+            assert_eq!(c.uncovered_commits, Some(0));
+            assert_eq!(c.exempt_commits, None);
+        }
+
+        fn assert_stale_unrelated(scm: &GitRepo, a: &str) {
+            let c = coverage(scm, a);
+            assert_eq!(c.stale_reason, Some(StaleReason::CommitsAdded));
+            assert_eq!(c.uncovered_commits, None);
+            assert_eq!(c.exempt_commits, None);
+        }
+
+        fn amend_all(repo: &Path) -> String {
+            git(repo, &["add", "-A"]);
+            git(repo, &["commit", "-q", "--amend", "--no-edit"]);
+            git(repo, &["rev-parse", "HEAD"])
+        }
+
+        #[test]
+        fn amending_only_the_review_log_into_approved_commit_is_fresh() {
+            let (dir, scm, a) = repo_approved_at_a();
+            append(dir.path(), LOG, "{\"event\":\"lgtm\"}\n");
+            let t = amend_all(dir.path());
+            assert_ne!(t, a);
+            assert_fresh_unrelated(&scm, &a);
+        }
+
+        #[test]
+        fn amending_a_source_change_into_approved_commit_is_stale() {
+            let (dir, scm, a) = repo_approved_at_a();
+            append(dir.path(), LOG, "{\"event\":\"lgtm\"}\n");
+            append(dir.path(), "src/lib.rs", "pub fn g() {}\n");
+            amend_all(dir.path());
+            assert_stale_unrelated(&scm, &a);
+        }
+
+        #[test]
+        fn amending_a_rewrite_of_the_review_log_is_stale() {
+            let (dir, scm, a) = repo_approved_at_a();
+            write(dir.path(), LOG, "{\"event\":\"forged\"}\n");
+            amend_all(dir.path());
+            assert_stale_unrelated(&scm, &a);
+        }
+
+        #[test]
+        fn amending_a_truncation_of_the_review_log_is_stale() {
+            let (dir, scm, a) = repo_approved_at_a();
+            write(dir.path(), LOG, "");
+            amend_all(dir.path());
+            assert_stale_unrelated(&scm, &a);
+        }
+
+        #[test]
+        fn approval_on_unrelated_branch_with_other_source_is_stale() {
+            let (dir, scm, _) = repo_approved_at_a();
+            let root = dir.path();
+            git(root, &["checkout", "-q", "--orphan", "other"]);
+            write(root, "src/lib.rs", "pub fn other() {}\n");
+            let a = commit_all(root, "unrelated");
+            git(root, &["checkout", "-q", "main"]);
+            assert_stale_unrelated(&scm, &a);
+        }
+
+        #[test]
+        fn approval_at_unresolvable_commit_is_stale() {
+            let (_dir, scm, _) = repo_approved_at_a();
+            assert_stale_unrelated(&scm, "0123456789abcdef0123456789abcdef01234567");
+            assert_stale_unrelated(&scm, "no-such-ref");
+        }
+
+        /// A symbolic approval resolves to the target itself, so a tree
+        /// comparison alone would call it fresh. It must name a commit id.
+        #[test]
+        fn approval_naming_a_revision_expression_is_stale() {
+            let (dir, scm, _) = repo_approved_at_a();
+            append(dir.path(), "src/lib.rs", "pub fn unreviewed() {}\n");
+            commit_all(dir.path(), "unreviewed");
+            assert_stale_unrelated(&scm, "HEAD");
+            assert_stale_unrelated(&scm, "HEAD~0");
+        }
+
+        #[test]
+        fn path_changes_between_compares_trees_of_unrelated_commits() {
+            use crate::scm::{PathChange, ScmRepo};
+            let (dir, scm, a) = repo_approved_at_a();
+            append(dir.path(), LOG, "{\"event\":\"lgtm\"}\n");
+            let t = amend_all(dir.path());
+            let changes = scm
+                .path_changes_between(&a, &t)
+                .expect("diff")
+                .expect("supported");
+            assert_eq!(changes, vec![PathChange::Modified(LOG.to_string())]);
+        }
+    }
+
+    // ---- jj: writing the review log into the approved change rewrites the
+    // ---- approved commit (bn-3rk0).
+
+    mod jj_rewrite {
+        use super::approved_review;
+        use crate::range::{approval_coverage, ApprovalCoverage, StaleReason};
+        use crate::scm::jj::JjScmRepo;
+        use crate::scm::ScmRepo;
+        use std::path::Path;
+        use std::process::Command;
+
+        const LOG: &str = ".seal/reviews/cr-1/events.jsonl";
+
+        fn jj(root: &Path, args: &[&str]) -> String {
+            let output = Command::new("jj")
+                .current_dir(root)
+                .args([
+                    "--config",
+                    "user.name=Test",
+                    "--config",
+                    "user.email=t@example.com",
+                ])
+                .args(args)
+                .output()
+                .expect("run jj");
+            assert!(
+                output.status.success(),
+                "jj {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout)
+                .expect("utf8")
+                .trim()
+                .to_string()
+        }
+
+        fn write(root: &Path, path: &str, body: &str) {
+            let full = root.join(path);
+            std::fs::create_dir_all(full.parent().expect("parent")).expect("mkdir");
+            std::fs::write(full, body).expect("write");
+        }
+
+        fn append(root: &Path, path: &str, body: &str) {
+            let old = std::fs::read_to_string(root.join(path)).expect("read");
+            write(root, path, &format!("{old}{body}"));
+        }
+
+        /// A jj repo whose working-copy change holds source and a review
+        /// log, approved at its current commit. Returns (dir, scm, change, A).
+        fn change_approved_at_a() -> Option<(tempfile::TempDir, JjScmRepo, String, String)> {
+            if which::which("jj").is_err() {
+                eprintln!("skipping: jj not installed");
+                return None;
+            }
+            let dir = tempfile::tempdir().expect("tempdir");
+            let root = dir.path();
+            jj(root, &["git", "init", "."]);
+            write(root, "src/lib.rs", "pub fn f() {}\n");
+            write(root, LOG, "{\"event\":\"created\"}\n");
+            let change = jj(root, &["log", "-r", "@", "--no-graph", "-T", "change_id"]);
+            let scm = JjScmRepo::new(root);
+            let a = scm.commit_for_anchor("@").expect("approved commit");
+            Some((dir, scm, change, a))
+        }
+
+        fn coverage(scm: &JjScmRepo, change: &str, approved: &str) -> ApprovalCoverage {
+            let mut review = approved_review("approved", Some(approved));
+            review.scm_kind = "jj".to_string();
+            review.scm_anchor = change.to_string();
+            review.jj_change_id = change.to_string();
+            review.initial_commit = approved.to_string();
+            approval_coverage(scm, &review).expect("coverage")
+        }
+
+        #[test]
+        fn jj_amending_only_the_review_log_keeps_approval_fresh() {
+            let Some((dir, scm, change, a)) = change_approved_at_a() else {
+                return;
+            };
+            append(dir.path(), LOG, "{\"event\":\"lgtm\"}\n");
+            let c = coverage(&scm, &change, &a);
+            assert_ne!(c.current_target, a, "the amend must rewrite the commit");
+            assert!(
+                !scm.is_ancestor(&a, &c.current_target).expect("ancestry"),
+                "the old commit must not be an ancestor of the rewrite"
+            );
+            assert!(!c.is_stale(), "expected fresh, got {c:?}");
+            assert_eq!(c.uncovered_commits, Some(0));
+            assert_eq!(c.exempt_commits, None);
+        }
+
+        #[test]
+        fn jj_amending_a_source_change_makes_approval_stale() {
+            let Some((dir, scm, change, a)) = change_approved_at_a() else {
+                return;
+            };
+            append(dir.path(), LOG, "{\"event\":\"lgtm\"}\n");
+            append(dir.path(), "src/lib.rs", "pub fn g() {}\n");
+            let c = coverage(&scm, &change, &a);
+            assert_ne!(c.current_target, a);
+            assert_eq!(c.stale_reason, Some(StaleReason::CommitsAdded));
+            assert_eq!(c.uncovered_commits, None);
+            assert_eq!(c.exempt_commits, None);
+        }
+
+        #[test]
+        fn jj_unresolvable_approved_commit_is_stale() {
+            let Some((_dir, scm, change, _)) = change_approved_at_a() else {
+                return;
+            };
+            let c = coverage(&scm, &change, "0123456789abcdef0123456789abcdef01234567");
+            assert_eq!(c.stale_reason, Some(StaleReason::CommitsAdded));
         }
     }
 }
