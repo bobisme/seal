@@ -671,6 +671,7 @@ impl Model {
                         thread_id: thread.thread_id.clone(),
                         status: thread.status.clone(),
                         comment_count: thread.comment_count,
+                        outdated: thread.outdated,
                         file_idx,
                     });
                 }
@@ -740,6 +741,9 @@ pub enum SidebarItem {
         thread_id: String,
         status: String,
         comment_count: i64,
+        /// True when the thread's anchor no longer maps cleanly onto the
+        /// review's current target (edited, deleted, or unmappable).
+        outdated: bool,
         /// Parent file index for selection matching
         file_idx: usize,
     },

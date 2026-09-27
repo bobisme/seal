@@ -40,6 +40,12 @@ pub struct ReviewDetail {
 }
 
 /// Summary of a thread for list views.
+///
+/// `selection_start`/`selection_end` are the line(s) the thread was created
+/// on. After a rebase or retarget those lines can drift, so readers that
+/// need to *place* the thread (in the diff, in a context window, in sort
+/// order) should go through [`ThreadSummary::effective_selection`] rather
+/// than reading `selection_start`/`selection_end` directly.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThreadSummary {
     pub thread_id: String,
@@ -48,6 +54,55 @@ pub struct ThreadSummary {
     pub selection_end: Option<i64>,
     pub status: String,
     pub comment_count: i64,
+    /// Where the anchor currently maps to in the review's target commit,
+    /// when it is still intact (`Unchanged` or `Shifted`). `None` when the
+    /// thread is outdated (see [`ThreadSummary::outdated`]).
+    #[serde(default)]
+    pub current_selection_start: Option<i64>,
+    #[serde(default)]
+    pub current_selection_end: Option<i64>,
+    /// Short drift label from `seal_core::anchor::AnchorLocation::drift_label`
+    /// (e.g. `unchanged`, `shifted(+2)`, `modified`, `deleted`, `unknown`).
+    #[serde(default)]
+    pub drift_status: String,
+    /// True when the anchored lines were edited, removed, or could not be
+    /// mapped at all. An outdated thread must still be shown, marked
+    /// outdated, never hidden or placed at a guessed line.
+    #[serde(default)]
+    pub outdated: bool,
+}
+
+impl ThreadSummary {
+    /// The line(s) to use when placing this thread: the mapped current
+    /// position when the anchor is intact, otherwise the originally stored
+    /// position (stable for sorting/labeling; never used to anchor an
+    /// outdated thread inline in the diff — callers must check `outdated`
+    /// before doing that).
+    #[must_use]
+    pub fn effective_selection(&self) -> (i64, Option<i64>) {
+        if self.outdated {
+            (self.selection_start, self.selection_end)
+        } else {
+            (
+                self.current_selection_start.unwrap_or(self.selection_start),
+                self.current_selection_end.or(self.selection_end),
+            )
+        }
+    }
+
+    /// First line of [`Self::effective_selection`].
+    #[must_use]
+    pub fn effective_start(&self) -> i64 {
+        self.effective_selection().0
+    }
+
+    /// Last line of [`Self::effective_selection`] (equal to the start for a
+    /// single-line selection).
+    #[must_use]
+    pub fn effective_end(&self) -> i64 {
+        let (start, end) = self.effective_selection();
+        end.unwrap_or(start)
+    }
 }
 
 /// Full details of a thread.

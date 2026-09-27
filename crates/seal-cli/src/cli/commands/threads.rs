@@ -7,10 +7,12 @@ use crate::cli::commands::helpers::{
     ensure_initialized, open_services, resolve_review_thread_commit, review_not_found_error,
     thread_not_found_error,
 };
+use crate::cli::commands::reviews::thread_line_label;
 use crate::output::{Formatter, OutputFormat};
 use seal_core::anchor::{AnchorLocation, AnchorLocator};
 use seal_core::events::CodeSelection;
 use seal_core::jj::context::{extract_context, format_context};
+use seal_core::projection::ThreadSummary;
 use seal_core::scm::ScmRepo;
 
 /// Create a new comment thread on a file.
@@ -84,8 +86,10 @@ pub fn run_threads_create(
 }
 
 /// List threads for a review with optional filters.
+#[allow(clippy::too_many_arguments)]
 pub fn run_threads_list(
     repo_root: &Path,
+    scm: &dyn ScmRepo,
     review_id: &str,
     status: Option<&str>,
     file: Option<&str>,
@@ -97,10 +101,12 @@ pub fn run_threads_list(
 
     let services = open_services(repo_root)?;
 
-    // Verify review exists
-    if services.reviews().get_optional(review_id)?.is_none() {
+    // Verify review exists, and resolve where its target commit is now so
+    // threads can be placed by their mapped line, not just their stored one.
+    let Some(review) = services.reviews().get_optional(review_id)? else {
         return Err(review_not_found_error(repo_root, review_id));
-    }
+    };
+    let target_commit = resolve_review_thread_commit(scm, &review);
 
     let threads = services.threads().list(review_id, status, file)?;
 
@@ -129,15 +135,17 @@ pub fn run_threads_list(
         "No threads yet"
     };
 
+    let mut locator = AnchorLocator::new(scm);
+
     if verbose && !threads.is_empty() {
         // Verbose mode: show first comment for each thread
         for thread in &threads {
-            let line_range = match thread.selection_end {
-                Some(end) if end != thread.selection_start => {
-                    format!("{}:{}-{}", thread.file_path, thread.selection_start, end)
-                }
-                _ => format!("{}:{}", thread.file_path, thread.selection_start),
-            };
+            let location = locate_thread(&mut locator, thread, &target_commit);
+            let line_range = format!(
+                "{}:{}",
+                thread.file_path,
+                thread_line_label(thread, &location)
+            );
 
             let status_icon = if thread.status == "open" {
                 "○"
@@ -176,9 +184,10 @@ pub fn run_threads_list(
             }
         }
     } else {
+        let positioned = threads_with_locations(&mut locator, &threads, &target_commit)?;
         let formatter = Formatter::new(format);
         formatter.print_list(
-            &threads,
+            &positioned,
             empty_msg,
             "threads",
             &["seal threads show <id>", "seal threads resolve <id>"],
@@ -186,6 +195,48 @@ pub fn run_threads_list(
     }
 
     Ok(())
+}
+
+/// Locate a thread's anchor in `target_commit` (mirrors
+/// `reviews::locate_thread`, duplicated locally since that one is private to
+/// its module).
+fn locate_thread(
+    locator: &mut AnchorLocator<'_>,
+    thread: &ThreadSummary,
+    target_commit: &str,
+) -> AnchorLocation {
+    locator.locate(
+        &thread.file_path,
+        thread.selection_start,
+        thread.selection_end,
+        &thread.commit_hash,
+        target_commit,
+    )
+}
+
+/// `threads list`'s JSON items: each thread plus where its lines are in the
+/// review's current target. Fields are only added to the existing
+/// `ThreadSummary` shape, so existing consumers keep working. Every thread
+/// is included, outdated or not — an outdated thread must stay visible,
+/// just marked.
+fn threads_with_locations(
+    locator: &mut AnchorLocator<'_>,
+    threads: &[ThreadSummary],
+    target_commit: &str,
+) -> Result<Vec<serde_json::Value>> {
+    threads
+        .iter()
+        .map(|thread| {
+            let location = locate_thread(locator, thread, target_commit);
+            let mut value = serde_json::to_value(thread)?;
+            value["current_selection_start"] = serde_json::json!(location.current_start);
+            value["current_selection_end"] = serde_json::json!(location.current_end);
+            value["drift_status"] = serde_json::json!(location.drift_label());
+            value["outdated"] = serde_json::json!(location.is_outdated());
+            value["outdated_reason"] = serde_json::json!(location.reason);
+            Ok(value)
+        })
+        .collect()
 }
 
 /// Show details for a specific thread with optional context.
@@ -680,5 +731,260 @@ mod tests {
         assert!(parse_line_selection("abc").is_err());
         assert!(parse_line_selection("10-20-30").is_err());
         assert!(parse_line_selection("").is_err());
+    }
+}
+
+/// `threads list` JSON fields against a real git rebase + retarget, mirroring
+/// `seal_core::anchor` tests' fixture style.
+#[cfg(test)]
+mod real_git_tests {
+    use super::*;
+    use seal_core::core::CoreContext;
+    use seal_core::scm::git::GitRepo;
+    use std::path::Path;
+    use std::process::Command;
+    use tempfile::TempDir;
+
+    fn git(repo: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .current_dir(repo)
+            .args(args)
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout)
+            .expect("utf8")
+            .trim()
+            .to_string()
+    }
+
+    fn write_lines(repo: &Path, path: &str, lines: &[String]) {
+        let mut body = lines.join("\n");
+        body.push('\n');
+        std::fs::write(repo.join(path), body).expect("write file");
+    }
+
+    fn base_lines() -> Vec<String> {
+        (1..=10).map(|i| format!("base {i}")).collect()
+    }
+
+    struct Fixture {
+        // Kept alive for the duration of the test; the repo lives under it.
+        #[allow(dead_code)]
+        dir: TempDir,
+        ctx: CoreContext,
+        scm: GitRepo,
+        review_id: String,
+        shift_thread: String,
+        modified_thread: String,
+    }
+
+    /// A review with two threads on `f.txt`, then a trunk commit that both
+    /// shifts (`base 5`, by inserting two lines above it) and edits in place
+    /// (`base 8`) the anchored lines, followed by a real `git rebase` and
+    /// `seal reviews retarget`.
+    fn build_fixture() -> Fixture {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        git(root, &["init", "-q"]);
+        git(root, &["config", "user.email", "test@example.com"]);
+        git(root, &["config", "user.name", "Test User"]);
+        std::fs::write(root.join(".git/info/exclude"), ".seal/\n").expect("exclude");
+        write_lines(root, "f.txt", &base_lines());
+        git(root, &["add", "f.txt"]);
+        git(root, &["commit", "-qm", "base"]);
+        git(root, &["branch", "-M", "main"]);
+        git(root, &["checkout", "-q", "--detach"]);
+
+        let mut lines = base_lines();
+        lines.extend(["feature A", "feature B", "feature C"].map(String::from));
+        write_lines(root, "f.txt", &lines);
+        git(root, &["commit", "-qam", "feature lines"]);
+
+        let seal_dir = root.join(".seal");
+        std::fs::create_dir(&seal_dir).expect("create .seal");
+        std::fs::write(seal_dir.join("version"), "2\n").expect("write version");
+        std::fs::create_dir(seal_dir.join("reviews")).expect("create reviews dir");
+
+        let ctx = CoreContext::new(root, &seal_dir.join("index.db")).expect("context");
+        let scm = GitRepo::new(root.to_path_buf());
+
+        // Each mutation is followed by a *fresh* `ctx.services()` call before
+        // the next read: the projection only picks up on-disk event log
+        // writes when it (re)syncs, which happens once per `services()` call
+        // (see `CoreContext::open_and_sync`), not automatically after a
+        // write made through an older handle.
+        let target = scm.current_commit().expect("target");
+        let base = seal_core::range::resolve_new_review_base(&scm, &target, None).expect("base");
+        let review_id = ctx
+            .services()
+            .expect("services")
+            .reviews()
+            .create(
+                &scm,
+                "Review".to_string(),
+                None,
+                None,
+                Some("alice"),
+                Some(base),
+            )
+            .expect("create review");
+
+        let review = ctx
+            .services()
+            .expect("services")
+            .reviews()
+            .get(&review_id)
+            .expect("review");
+        let commit = seal_core::range::resolve_target_commit(&scm, &review);
+
+        let shift_thread = ctx
+            .services()
+            .expect("services")
+            .threads()
+            .create(
+                &review_id,
+                "f.txt",
+                CodeSelection::line(5),
+                commit.clone(),
+                Some("alice"),
+            )
+            .expect("create shift thread");
+        let modified_thread = ctx
+            .services()
+            .expect("services")
+            .threads()
+            .create(
+                &review_id,
+                "f.txt",
+                CodeSelection::line(8),
+                commit,
+                Some("alice"),
+            )
+            .expect("create modified thread");
+
+        // Trunk edit: insert two lines above "base 5" (shifts it to line 7)
+        // and rewrite "base 8" in place (so its anchor becomes modified).
+        let head = git(root, &["rev-parse", "HEAD"]);
+        git(root, &["checkout", "-q", "main"]);
+        let mut trunk_lines = base_lines();
+        trunk_lines[7] = "base 8 CHANGED".to_string();
+        trunk_lines.splice(2..2, ["trunk A".to_string(), "trunk B".to_string()]);
+        write_lines(root, "f.txt", &trunk_lines);
+        git(root, &["commit", "-qam", "trunk edit"]);
+        git(root, &["checkout", "-q", "--detach", &head]);
+        git(root, &["rebase", "-q", "main"]);
+        assert_ne!(git(root, &["rev-parse", "HEAD"]), head, "rebase rewrote");
+
+        ctx.services()
+            .expect("services")
+            .reviews()
+            .retarget(&scm, &review_id, Some("alice"), None)
+            .expect("retarget");
+
+        Fixture {
+            dir,
+            ctx,
+            scm,
+            review_id,
+            shift_thread,
+            modified_thread,
+        }
+    }
+
+    fn field<'a>(value: &'a serde_json::Value, key: &str) -> &'a serde_json::Value {
+        value
+            .get(key)
+            .unwrap_or_else(|| panic!("missing field {key}"))
+    }
+
+    #[test]
+    fn threads_with_locations_maps_shifted_and_flags_modified_after_rebase() {
+        let fixture = build_fixture();
+        let services = fixture.ctx.services().expect("services");
+
+        let review = services.reviews().get(&fixture.review_id).expect("review");
+        let target_commit = resolve_review_thread_commit(&fixture.scm, &review);
+        let threads = services
+            .threads()
+            .list(&fixture.review_id, None, None)
+            .expect("threads");
+        assert_eq!(threads.len(), 2, "both threads must still be listed");
+
+        let mut locator = AnchorLocator::new(&fixture.scm);
+        let positioned =
+            threads_with_locations(&mut locator, &threads, &target_commit).expect("positioned");
+        assert_eq!(
+            positioned.len(),
+            2,
+            "outdated threads must not be dropped from `threads list`"
+        );
+
+        let shifted = positioned
+            .iter()
+            .find(|v| field(v, "thread_id") == &serde_json::json!(fixture.shift_thread))
+            .expect("shifted thread present");
+        // Additive only: the originally stored line is untouched...
+        assert_eq!(field(shifted, "selection_start"), &serde_json::json!(5));
+        // ...while the new fields carry the mapped, current line.
+        assert_eq!(
+            field(shifted, "current_selection_start"),
+            &serde_json::json!(7)
+        );
+        assert_eq!(field(shifted, "outdated"), &serde_json::json!(false));
+        assert_eq!(
+            field(shifted, "drift_status").as_str().unwrap(),
+            "shifted(+2)"
+        );
+
+        let modified = positioned
+            .iter()
+            .find(|v| field(v, "thread_id") == &serde_json::json!(fixture.modified_thread))
+            .expect("modified thread present");
+        assert_eq!(field(modified, "selection_start"), &serde_json::json!(8));
+        assert_eq!(
+            field(modified, "current_selection_start"),
+            &serde_json::Value::Null,
+            "a modified anchor has no current line to map to"
+        );
+        assert_eq!(field(modified, "outdated"), &serde_json::json!(true));
+        assert_eq!(
+            field(modified, "drift_status").as_str().unwrap(),
+            "modified"
+        );
+    }
+
+    #[test]
+    fn threads_with_locations_marks_unmappable_anchors_as_unknown_and_keeps_them() {
+        let fixture = build_fixture();
+        let services = fixture.ctx.services().expect("services");
+        let review = services.reviews().get(&fixture.review_id).expect("review");
+        let target_commit = resolve_review_thread_commit(&fixture.scm, &review);
+
+        let mut thread = services
+            .threads()
+            .list(&fixture.review_id, None, None)
+            .expect("threads")
+            .into_iter()
+            .next()
+            .expect("at least one thread");
+        // Simulate a garbage-collected anchor commit.
+        thread.commit_hash = "0000000000000000000000000000000000dead".to_string();
+
+        let mut locator = AnchorLocator::new(&fixture.scm);
+        let positioned =
+            threads_with_locations(&mut locator, &[thread], &target_commit).expect("positioned");
+
+        assert_eq!(positioned.len(), 1, "unmappable threads must stay visible");
+        assert_eq!(field(&positioned[0], "outdated"), &serde_json::json!(true));
+        assert_eq!(
+            field(&positioned[0], "drift_status").as_str().unwrap(),
+            "unknown"
+        );
+        assert!(field(&positioned[0], "outdated_reason").is_string());
     }
 }

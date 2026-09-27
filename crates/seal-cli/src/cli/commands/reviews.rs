@@ -1299,7 +1299,7 @@ const fn context_source<'a>(
 
 /// Human label for a thread's lines, e.g. `line 7, was 5` or
 /// `line 5, outdated: modified`.
-fn thread_line_label(thread: &ThreadSummary, location: &AnchorLocation) -> String {
+pub(crate) fn thread_line_label(thread: &ThreadSummary, location: &AnchorLocation) -> String {
     let lines = |start: i64, end: Option<i64>| match end {
         Some(end) if end != start => format!("lines {start}-{end}"),
         _ => format!("line {start}"),

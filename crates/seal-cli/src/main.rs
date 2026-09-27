@@ -237,8 +237,10 @@ fn main() -> Result<()> {
                 let since_dt = since
                     .map(|s| seal_cli::cli::commands::reviews::parse_since(&s))
                     .transpose()?;
+                let scm = resolve_backend(&workspace_root, scm_preference)?;
                 run_threads_list(
                     &seal_root,
+                    scm.as_ref(),
                     &review_id,
                     status_str,
                     file.as_deref(),

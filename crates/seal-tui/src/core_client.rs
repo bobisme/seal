@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
+use seal_core::anchor::{AnchorLocation, AnchorLocator};
 use seal_core::core::{CoreContext, SealServices};
 use seal_core::events::CodeSelection;
 use seal_core::scm::{git_diff_section_path, resolve_backend, ScmPreference, ScmRepo};
@@ -78,7 +79,12 @@ fn convert_review_detail(r: &seal_core::projection::ReviewDetail) -> ReviewDetai
     }
 }
 
-fn convert_thread_summary(t: &seal_core::projection::ThreadSummary) -> ThreadSummary {
+/// Convert a core thread summary, positioning it with `location` (its anchor
+/// mapped into the review's current target — see [`locate_threads`]).
+fn convert_thread_summary(
+    t: &seal_core::projection::ThreadSummary,
+    location: &AnchorLocation,
+) -> ThreadSummary {
     ThreadSummary {
         thread_id: t.thread_id.clone(),
         file_path: t.file_path.clone(),
@@ -86,6 +92,50 @@ fn convert_thread_summary(t: &seal_core::projection::ThreadSummary) -> ThreadSum
         selection_end: t.selection_end,
         status: t.status.clone(),
         comment_count: t.comment_count,
+        current_selection_start: location.current_start.map(i64::from),
+        current_selection_end: location.current_end.map(i64::from),
+        drift_status: location.drift_label(),
+        outdated: location.is_outdated(),
+    }
+}
+
+/// Map each thread's anchor into `target_commit`, parsing each diff at most
+/// once. Called once per review load (not per render frame) so the TUI stays
+/// responsive; when `scm` cannot be resolved, every thread is treated as
+/// unchanged at its stored line rather than blocking the load.
+fn locate_threads(
+    scm: &dyn ScmRepo,
+    threads: &[seal_core::projection::ThreadSummary],
+    target_commit: &str,
+) -> HashMap<String, AnchorLocation> {
+    let mut locator = AnchorLocator::new(scm);
+    threads
+        .iter()
+        .map(|t| {
+            let location = locator.locate(
+                &t.file_path,
+                t.selection_start,
+                t.selection_end,
+                &t.commit_hash,
+                target_commit,
+            );
+            (t.thread_id.clone(), location)
+        })
+        .collect()
+}
+
+/// The best-effort location for a thread when the anchor could not be
+/// computed at all (no SCM backend available): assume unchanged so the
+/// thread still renders at its stored line rather than being hidden.
+fn assume_unchanged(t: &seal_core::projection::ThreadSummary) -> AnchorLocation {
+    AnchorLocation {
+        status: seal_core::anchor::AnchorStatus::Unchanged,
+        original_start: u32::try_from(t.selection_start.max(0)).unwrap_or(u32::MAX),
+        original_end: u32::try_from(t.selection_end.unwrap_or(t.selection_start).max(0))
+            .unwrap_or(u32::MAX),
+        current_start: u32::try_from(t.selection_start.max(0)).ok(),
+        current_end: u32::try_from(t.selection_end.unwrap_or(t.selection_start).max(0)).ok(),
+        reason: None,
     }
 }
 
@@ -129,11 +179,26 @@ impl SealClient for CoreClient {
             .filter(|thread| !sealignore.is_ignored(&thread.file_path))
             .collect();
 
+        // Map each thread's anchor into the review's current target once,
+        // here at load time, so rendering never re-parses diffs per frame.
+        let scm = resolve_backend(&self.repo_root, ScmPreference::Auto).ok();
+        let target_commit = scm
+            .as_ref()
+            .map(|scm| resolve_review_target_commit(scm.as_ref(), &detail));
+        let locations: HashMap<String, AnchorLocation> = match (&scm, &target_commit) {
+            (Some(scm), Some(target)) => locate_threads(scm.as_ref(), &visible_threads, target),
+            _ => HashMap::new(),
+        };
+
         let mut threads = Vec::with_capacity(visible_threads.len());
         let mut comments: HashMap<String, Vec<Comment>> = HashMap::new();
 
         for t in &visible_threads {
-            threads.push(convert_thread_summary(t));
+            let location = locations
+                .get(&t.thread_id)
+                .cloned()
+                .unwrap_or_else(|| assume_unchanged(t));
+            threads.push(convert_thread_summary(t, &location));
 
             let core_comments = services
                 .comments()
@@ -150,8 +215,11 @@ impl SealClient for CoreClient {
 
         let review_detail = convert_review_detail(&detail);
 
-        // Build file diffs using SCM
-        let files = self.build_file_diffs(&detail, &visible_threads);
+        // Build file diffs using SCM. Uses the already-positioned threads so
+        // the orphan/context-window heuristic agrees with where threads are
+        // actually rendered (mapped line for intact anchors, no preview for
+        // outdated ones).
+        let files = self.build_file_diffs(&detail, &threads);
 
         Ok(Some(ReviewData {
             detail: review_detail,
@@ -245,7 +313,7 @@ impl CoreClient {
     fn build_file_diffs(
         &self,
         review: &seal_core::projection::ReviewDetail,
-        threads: &[seal_core::projection::ThreadSummary],
+        threads: &[ThreadSummary],
     ) -> Vec<FileData> {
         let Ok(scm) = resolve_backend(&self.repo_root, ScmPreference::Auto) else {
             return Vec::new();
@@ -292,10 +360,13 @@ impl CoreClient {
                 .get(file_path.as_str())
                 .map(std::string::ToString::to_string);
 
-            // Check for orphaned threads (not covered by diff hunks)
-            let file_threads: Vec<&seal_core::projection::ThreadSummary> = threads
+            // Check for orphaned threads (not covered by diff hunks). Outdated
+            // threads are excluded: there is no reliable target-commit line
+            // to window around for them, so they render as plain comment
+            // blocks instead (see `view::diff::mod::render_file_with_diff`).
+            let file_threads: Vec<&ThreadSummary> = threads
                 .iter()
-                .filter(|t| &t.file_path == file_path)
+                .filter(|t| &t.file_path == file_path && !t.outdated)
                 .collect();
 
             let content = if file_threads.is_empty() {
@@ -303,7 +374,7 @@ impl CoreClient {
             } else if let Some(ref diff_text) = diff {
                 let hunks = parse_hunk_ranges(diff_text);
                 let has_orphan = file_threads.iter().any(|t| {
-                    let line = t.selection_start as u32;
+                    let line = u32::try_from(t.effective_start().max(0)).unwrap_or(u32::MAX);
                     !hunks.iter().any(|h| line >= h.0 && line <= h.1)
                 });
                 if has_orphan {
@@ -399,7 +470,7 @@ fn parse_hunk_ranges(diff: &str) -> Vec<(u32, u32)> {
 fn build_content_window(
     file_cache: &HashMap<String, String>,
     file_path: &str,
-    threads: &[&seal_core::projection::ThreadSummary],
+    threads: &[&ThreadSummary],
 ) -> Option<FileContentData> {
     let contents = file_cache.get(file_path)?;
     let lines: Vec<&str> = contents.lines().collect();
@@ -413,10 +484,10 @@ fn build_content_window(
     let mut max_line = 0u32;
 
     for t in threads {
-        let start = t.selection_start as u32;
-        let end = t.selection_end.unwrap_or(t.selection_start) as u32;
+        let start = u32::try_from(t.effective_start().max(0)).unwrap_or(u32::MAX);
+        let end = u32::try_from(t.effective_end().max(0)).unwrap_or(u32::MAX);
         min_line = min_line.min(start.saturating_sub(context));
-        max_line = max_line.max(end + context);
+        max_line = max_line.max(end.saturating_add(context));
     }
 
     // Clamp to file bounds (1-based)

@@ -187,6 +187,7 @@ fn draw_sidebar_thread_item(
         thread_id,
         status,
         comment_count,
+        outdated,
         ..
     } = item
     {
@@ -208,6 +209,19 @@ fn draw_sidebar_thread_item(
 
         let indent: u32 = 4;
         let thread_x = inner.x + pad.left + indent;
+
+        // Mark threads whose anchor no longer maps cleanly onto the
+        // review's current target (edited, deleted, or unmappable) so they
+        // are never mistaken for a thread still exactly where it was left.
+        if *outdated {
+            buffer_draw_text(
+                buffer,
+                thread_x.saturating_sub(2),
+                y,
+                "!",
+                Style::fg(theme.error).with_bg(row_bg),
+            );
+        }
 
         // Right-aligned comment count indicator
         let count_text = format!("{comment_count}");

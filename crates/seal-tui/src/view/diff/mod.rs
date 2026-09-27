@@ -554,11 +554,25 @@ fn render_file_with_diff(
         .iter()
         .filter(|t| !anchored_ids.contains(t.thread_id.as_str()))
         .collect();
+    // Outdated threads (modified/deleted/unknown anchor) have no reliable
+    // target line to preview code around, so they never enter the windowed
+    // context below — they always render as a plain comment block further
+    // down, still visible and marked outdated via their label.
+    let previewable_orphans: Vec<&&ThreadSummary> = orphaned_threads
+        .iter()
+        .filter(|t| !t.outdated)
+        .copied()
+        .collect();
+    let outdated_orphans: Vec<&&ThreadSummary> = orphaned_threads
+        .iter()
+        .filter(|t| t.outdated)
+        .copied()
+        .collect();
     let mut orphaned_context: Option<OrphanedContext<'_>> = None;
-    if !orphaned_threads.is_empty() {
+    if !previewable_orphans.is_empty() {
         if let Some(content) = &entry.file_content {
             let orphaned_deref: Vec<&ThreadSummary> =
-                orphaned_threads.iter().map(|t| **t).collect();
+                previewable_orphans.iter().map(|t| **t).collect();
             let hunk_ranges = crate::diff::hunk_exclusion_ranges(&diff.hunks);
             #[allow(clippy::cast_possible_wrap)]
             let total_lines = content.start_line + content.lines.len() as i64 - 1;
@@ -619,10 +633,19 @@ fn render_file_with_diff(
             &emitted_threads,
             sctx.highlighter,
         );
-    } else if !orphaned_threads.is_empty() {
-        let mut orphaned_sorted = orphaned_threads.clone();
-        orphaned_sorted.sort_by_key(|t| t.selection_start);
-        for thread in &orphaned_sorted {
+    }
+
+    // Threads with no code preview at all: outdated ones always land here;
+    // previewable orphans join them only if no context section was built
+    // (e.g. the file's content wasn't cached). Every orphaned thread is
+    // guaranteed exactly one of these two paths, so none are ever dropped.
+    let mut plain_threads: Vec<&&ThreadSummary> = outdated_orphans;
+    if orphaned_context.is_none() {
+        plain_threads.extend(previewable_orphans);
+    }
+    if !plain_threads.is_empty() {
+        plain_threads.sort_by_key(|t| t.effective_start());
+        for thread in &plain_threads {
             sctx.thread_positions
                 .borrow_mut()
                 .insert(thread.thread_id.clone(), cursor.stream_row);
@@ -732,10 +755,10 @@ fn render_file_content_no_diff(
         }
 
         if let DisplayItem::Line { line_num, .. } = &item {
-            for thread in file_threads.iter().filter(|t| {
-                let end = t.selection_end.unwrap_or(t.selection_start);
-                end == *line_num
-            }) {
+            for thread in file_threads
+                .iter()
+                .filter(|t| t.effective_end() == *line_num)
+            {
                 sctx.thread_positions
                     .borrow_mut()
                     .entry(thread.thread_id.clone())
@@ -1079,8 +1102,9 @@ fn build_sbs_anchor_maps<'a>(
     let mut sbs_comment_map: AnchorMap<'_> = std::collections::HashMap::new();
     for anchor in anchors {
         if let Some(thread) = threads.iter().find(|t| t.thread_id == anchor.thread_id) {
-            let start = thread.selection_start as u32;
-            let end = thread.selection_end.unwrap_or(thread.selection_start) as u32;
+            let (eff_start, eff_end) = thread.effective_selection();
+            let start = u32::try_from(eff_start.max(0)).unwrap_or(u32::MAX);
+            let end = u32::try_from(eff_end.unwrap_or(eff_start).max(0)).unwrap_or(u32::MAX);
             for (si, sl) in sbs_lines.iter().enumerate() {
                 if sl.right.as_ref().is_some_and(|l| l.line_num == start) {
                     sbs_anchor_map.entry(si).or_default().push(anchor);

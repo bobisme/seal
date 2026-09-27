@@ -36,9 +36,10 @@ pub(super) fn calculate_context_ranges(
     let mut ranges: Vec<LineRange> = threads
         .iter()
         .map(|t| {
-            let thread_end = t.selection_end.unwrap_or(t.selection_start);
+            let (start, end) = t.effective_selection();
+            let thread_end = end.unwrap_or(start);
             LineRange {
-                start: (t.selection_start - CONTEXT_LINES).max(1),
+                start: (start - CONTEXT_LINES).max(1),
                 #[allow(clippy::cast_possible_wrap)]
                 end: (thread_end + CONTEXT_LINES).min(total_lines as i64),
             }
@@ -204,7 +205,7 @@ pub(super) fn emit_orphaned_context_section(
         if let DisplayItem::Line { line_num, .. } = item {
             if let Some(prev) = state.last_line_num.as_ref() {
                 for thread in &context.threads {
-                    let end = thread.selection_end.unwrap_or(thread.selection_start);
+                    let end = thread.effective_end();
                     if !state.emitted_threads.contains(thread.thread_id.as_str())
                         && end > *prev
                         && end < *line_num
@@ -311,7 +312,7 @@ pub(super) fn emit_orphaned_context_section(
                     .iter()
                     .copied()
                     .filter(|thread| {
-                        let end = thread.selection_end.unwrap_or(thread.selection_start);
+                        let end = thread.effective_end();
                         end == *line_num
                             && !state.emitted_threads.contains(thread.thread_id.as_str())
                     })
@@ -357,7 +358,7 @@ pub(super) fn emit_remaining_orphaned_comments(
         .iter()
         .filter(|t| !emitted_threads.contains(t.thread_id.as_str()))
         .collect();
-    remaining.sort_by_key(|t| t.selection_start);
+    remaining.sort_by_key(|t| t.effective_start());
     for thread in remaining {
         thread_positions
             .borrow_mut()

@@ -1,5 +1,7 @@
 //! Comment block rendering (thread comment bubbles in the diff stream).
 
+use std::fmt::Write as _;
+
 use crate::render_backend::{buffer_draw_text, buffer_fill_rect, color_lerp, Style};
 
 use crate::db::ThreadSummary;
@@ -38,11 +40,19 @@ fn build_comment_lines(
 ) -> Vec<CommentLine> {
     let mut content_lines: Vec<CommentLine> = Vec::new();
 
-    let line_range = thread.selection_end.map_or_else(
-        || format!("{}", thread.selection_start),
-        |end| format!("{}-{}", thread.selection_start, end),
+    let (eff_start, eff_end) = thread.effective_selection();
+    let line_range = eff_end.map_or_else(
+        || format!("{eff_start}"),
+        |end| format!("{eff_start}-{end}"),
     );
     let mut right_text = format!("{}:{}", thread.file_path, line_range);
+    // Mark a thread whose anchor no longer maps cleanly, so it's never
+    // confused with one that's still exactly where it was created.
+    if thread.outdated {
+        let _ = write!(right_text, " [{}]", thread.drift_status);
+    } else if eff_start != thread.selection_start {
+        let _ = write!(right_text, " (was {})", thread.selection_start);
+    }
     let right_max = content_width.saturating_sub(thread.thread_id.len().saturating_add(1));
     if right_max > 0 && right_text.len() > right_max {
         right_text = crate::view::components::truncate_path(&right_text, right_max);
@@ -313,6 +323,10 @@ mod tests {
             selection_end: None,
             status: "open".to_string(),
             comment_count: 2,
+            current_selection_start: Some(10),
+            current_selection_end: None,
+            drift_status: "unchanged".to_string(),
+            outdated: false,
         }
     }
 
@@ -333,5 +347,28 @@ mod tests {
             .filter(|line| matches!(&line.content, MarkdownContent::Text(text) if text.is_empty()))
             .count();
         assert!(blanks >= 2);
+    }
+
+    #[test]
+    fn header_shows_mapped_line_and_was_marker_when_shifted() {
+        let mut t = thread();
+        t.current_selection_start = Some(13);
+        let lines = build_comment_lines(&t, &[comment("th-1234.1", "alice", "hi")], 60, None);
+        let header = lines.first().expect("header line");
+        let right = header.right.as_deref().expect("right text");
+        assert_eq!(right, "src/lib.rs:13 (was 10)");
+    }
+
+    #[test]
+    fn header_marks_outdated_threads_and_keeps_stored_line() {
+        let mut t = thread();
+        t.current_selection_start = None;
+        t.current_selection_end = None;
+        t.drift_status = "modified".to_string();
+        t.outdated = true;
+        let lines = build_comment_lines(&t, &[comment("th-1234.1", "alice", "hi")], 60, None);
+        let header = lines.first().expect("header line");
+        let right = header.right.as_deref().expect("right text");
+        assert_eq!(right, "src/lib.rs:10 [modified]");
     }
 }

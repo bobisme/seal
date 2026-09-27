@@ -152,21 +152,32 @@ pub fn compute_stream_layout(params: &StreamLayoutParams<'_>) -> StreamLayout {
                         .filter(|t| !anchored_ids.contains(t.thread_id.as_str()))
                         .copied()
                         .collect();
+                    // Only intact (non-outdated) orphans get a code preview
+                    // window — this must mirror the render-side split in
+                    // `view::diff::mod::render_file_with_diff` or the
+                    // computed row count and the actual render disagree.
+                    let previewable_orphans: Vec<&ThreadSummary> = orphaned_threads
+                        .iter()
+                        .filter(|t| !t.outdated)
+                        .copied()
+                        .collect();
 
                     let mut count = diff_line_count_for_view(diff, view_mode, wrap, content_width)
                         + threads_comment_height(&anchored_threads, all_comments, content_width);
 
                     if !orphaned_threads.is_empty() {
-                        if let Some(content) = &entry.file_content {
-                            let hunk_ranges = crate::diff::hunk_exclusion_ranges(&diff.hunks);
-                            count += orphaned_context_display_count(
-                                content.lines.as_slice(),
-                                content.start_line,
-                                &orphaned_threads,
-                                &hunk_ranges,
-                                wrap,
-                                content_width,
-                            );
+                        if !previewable_orphans.is_empty() {
+                            if let Some(content) = &entry.file_content {
+                                let hunk_ranges = crate::diff::hunk_exclusion_ranges(&diff.hunks);
+                                count += orphaned_context_display_count(
+                                    content.lines.as_slice(),
+                                    content.start_line,
+                                    &previewable_orphans,
+                                    &hunk_ranges,
+                                    wrap,
+                                    content_width,
+                                );
+                            }
                         }
                         count +=
                             threads_comment_height(&orphaned_threads, all_comments, content_width);
@@ -354,8 +365,9 @@ fn context_display_count(
     #[allow(clippy::cast_possible_wrap)]
     let end_line = start_line + lines.len() as i64 - 1;
     for thread in threads.iter().filter(|t| t.file_path == file_path) {
-        let thread_end = thread.selection_end.unwrap_or(thread.selection_start);
-        let start = (thread.selection_start - layout::CONTEXT_LINES).max(start_line);
+        let (eff_start, eff_end) = thread.effective_selection();
+        let thread_end = eff_end.unwrap_or(eff_start);
+        let start = (eff_start - layout::CONTEXT_LINES).max(start_line);
         let end = (thread_end + layout::CONTEXT_LINES).min(end_line);
         if start <= end {
             ranges.push((start, end));
@@ -421,8 +433,9 @@ fn orphaned_context_display_count(
     let mut ranges: Vec<(i64, i64)> = orphaned_threads
         .iter()
         .map(|t| {
-            let thread_end = t.selection_end.unwrap_or(t.selection_start);
-            let start = (t.selection_start - layout::CONTEXT_LINES).max(start_line);
+            let (eff_start, eff_end) = t.effective_selection();
+            let thread_end = eff_end.unwrap_or(eff_start);
+            let start = (eff_start - layout::CONTEXT_LINES).max(start_line);
             let end = (thread_end + layout::CONTEXT_LINES).min(end_line);
             (start, end)
         })
@@ -526,7 +539,8 @@ fn all_context_extra_lines(
     let end_line = start_line + total_lines as i64 - 1;
     let mut total = 0;
     for thread in file_threads {
-        if thread.selection_start < start_line || thread.selection_start > end_line {
+        let start = thread.effective_start();
+        if start < start_line || start > end_line {
             continue;
         }
         if let Some(comments) = all_comments.get(&thread.thread_id) {
@@ -549,6 +563,10 @@ mod tests {
             selection_end: end,
             status: "open".to_string(),
             comment_count: 1,
+            current_selection_start: Some(start),
+            current_selection_end: end,
+            drift_status: "unchanged".to_string(),
+            outdated: false,
         }
     }
 
