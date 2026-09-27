@@ -6,7 +6,7 @@ pub mod context;
 pub mod drift;
 
 pub use context::{extract_context, format_context, CodeContext, ContextLine};
-pub use drift::{calculate_drift, DriftResult};
+pub use drift::{calculate_drift, DriftResult, RangeDrift};
 
 use anyhow::{bail, Context, Result};
 use std::fs;

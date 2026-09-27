@@ -8,6 +8,7 @@ use crate::cli::commands::helpers::{
     thread_not_found_error,
 };
 use crate::output::{Formatter, OutputFormat};
+use seal_core::anchor::{AnchorLocation, AnchorLocator};
 use seal_core::events::CodeSelection;
 use seal_core::jj::context::{extract_context, format_context};
 use seal_core::scm::ScmRepo;
@@ -209,17 +210,50 @@ pub fn run_threads_show(
 
     match thread {
         Some(t) => {
+            // Where the thread's lines are in the code the review shows now.
+            let target_commit = services.reviews().get_optional(&t.review_id)?.map_or_else(
+                || t.commit_hash.clone(),
+                |review| resolve_review_thread_commit(scm, &review),
+            );
+            let mut locator = AnchorLocator::new(scm);
+            let location = locator.locate(
+                &t.file_path,
+                t.selection_start,
+                t.selection_end,
+                &t.commit_hash,
+                &target_commit,
+            );
+
             // If context requested, extract it (use workspace for jj context)
             let code_context = if context_lines > 0 {
-                let anchor_start = t.selection_start as u32;
-                let anchor_end = t.selection_end.unwrap_or(t.selection_start) as u32;
-
-                // Use current commit or original commit based on flag
-                let commit_ref = if use_current {
-                    scm.current_commit()
-                        .unwrap_or_else(|_| t.commit_hash.clone())
+                // With --current, show the thread's lines where they are in
+                // the workspace's current commit. When they no longer exist
+                // there, fall back to the code as commented.
+                let (commit_ref, anchor_start, anchor_end) = if use_current {
+                    let current = scm
+                        .current_commit()
+                        .unwrap_or_else(|_| t.commit_hash.clone());
+                    let at_current = locator.locate(
+                        &t.file_path,
+                        t.selection_start,
+                        t.selection_end,
+                        &t.commit_hash,
+                        &current,
+                    );
+                    match (at_current.current_start, at_current.current_end) {
+                        (Some(start), Some(end)) => (current, start, end),
+                        _ => (
+                            t.commit_hash.clone(),
+                            at_current.original_start,
+                            at_current.original_end,
+                        ),
+                    }
                 } else {
-                    t.commit_hash.clone()
+                    (
+                        t.commit_hash.clone(),
+                        location.original_start,
+                        location.original_end,
+                    )
                 };
 
                 match extract_context(
@@ -244,10 +278,10 @@ pub fn run_threads_show(
             // Build output based on format
             if conversation {
                 // Conversation format: human-readable with timestamps
-                print_conversation(&t, code_context.as_ref(), use_color);
+                print_conversation(&t, &location, code_context.as_ref(), use_color);
             } else if matches!(format, OutputFormat::Json) {
                 // For JSON, include context as structured data
-                let mut result = serde_json::to_value(&t)?;
+                let mut result = thread_with_location(&t, &location, &target_commit)?;
                 if let Some(ctx) = code_context {
                     result["code_context"] = serde_json::to_value(&ctx)?;
                 }
@@ -256,7 +290,7 @@ pub fn run_threads_show(
             } else {
                 // For text/pretty, print thread details then context
                 let formatter = Formatter::new(format);
-                formatter.print(&t)?;
+                formatter.print(&thread_with_location(&t, &location, &target_commit)?)?;
 
                 if let Some(ctx) = code_context {
                     println!("\nCode context:");
@@ -270,6 +304,23 @@ pub fn run_threads_show(
     }
 
     Ok(())
+}
+
+/// A thread's JSON with where its lines are in the review target. Fields
+/// are only added, so existing consumers keep working.
+fn thread_with_location(
+    thread: &seal_core::projection::ThreadDetail,
+    location: &AnchorLocation,
+    target_commit: &str,
+) -> Result<serde_json::Value> {
+    let mut value = serde_json::to_value(thread)?;
+    value["target_commit"] = serde_json::json!(target_commit);
+    value["current_selection_start"] = serde_json::json!(location.current_start);
+    value["current_selection_end"] = serde_json::json!(location.current_end);
+    value["drift_status"] = serde_json::json!(location.drift_label());
+    value["outdated"] = serde_json::json!(location.is_outdated());
+    value["outdated_reason"] = serde_json::json!(location.reason);
+    Ok(value)
 }
 
 /// ANSI color codes for terminal output
@@ -287,6 +338,7 @@ mod colors {
 /// Format and print a thread as a human-readable conversation.
 fn print_conversation(
     thread: &seal_core::projection::ThreadDetail,
+    location: &AnchorLocation,
     code_context: Option<&seal_core::jj::context::CodeContext>,
     use_color: bool,
 ) {
@@ -319,6 +371,16 @@ fn print_conversation(
             format!("lines {}-{}", thread.selection_start, end)
         }
         _ => format!("line {}", thread.selection_start),
+    };
+    let line_range = if location.is_outdated() {
+        format!("{line_range}, outdated: {}", location.drift_label())
+    } else {
+        match location.current_start {
+            Some(current) if i64::from(current) != thread.selection_start => {
+                format!("{line_range}, now line {current}")
+            }
+            _ => line_range,
+        }
     };
 
     println!(

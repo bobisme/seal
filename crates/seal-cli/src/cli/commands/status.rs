@@ -6,9 +6,12 @@ use std::path::Path;
 
 use crate::cli::commands::helpers::{ensure_initialized, open_services, review_not_found_error};
 use crate::output::{Formatter, OutputFormat};
-use seal_core::jj::drift::{calculate_drift, DriftResult};
-use seal_core::projection::ThreadSummary;
-use seal_core::range::{approval_coverage, detect_stale_base, resolve_review_range};
+use seal_core::anchor::{AnchorLocation, AnchorLocator, AnchorStatus};
+use seal_core::core::SealServices;
+use seal_core::projection::{ReviewDetail, ThreadSummary};
+use seal_core::range::{
+    approval_coverage, detect_stale_base, resolve_review_range, resolve_target_commit,
+};
 use seal_core::scm::{git_diff_changed_paths, ScmRepo};
 use seal_core::sealignore::{AllFilesIgnoredError, SealIgnore};
 
@@ -19,7 +22,13 @@ pub struct ThreadStatusEntry {
     pub file_path: String,
     pub original_line: i64,
     pub current_line: Option<i64>,
+    /// Last anchored line in the review target, for range threads.
+    pub current_line_end: Option<i64>,
+    /// `unchanged`, `shifted(+N)`, `modified`, `deleted` or `unknown`.
     pub drift_status: String,
+    /// The anchored lines were edited, removed, or cannot be mapped. The
+    /// thread is still listed.
+    pub outdated: bool,
     pub status: String,
     pub comment_count: i64,
 }
@@ -51,7 +60,6 @@ pub fn run_status(
     ensure_initialized(seal_root)?;
 
     let services = open_services(seal_root)?;
-    let current_commit = scm.current_commit()?;
 
     // Get reviews to process
     let reviews = if let Some(rid) = review_id {
@@ -78,83 +86,7 @@ pub fn run_status(
     let mut statuses = Vec::new();
 
     for review in reviews {
-        // Get threads for this review
-        let status_filter = if unresolved_only { Some("open") } else { None };
-        let threads = services
-            .threads()
-            .list(&review.review_id, status_filter, None)?;
-
-        let mut thread_entries = Vec::new();
-        let mut drift_count = 0;
-
-        for thread in &threads {
-            // Calculate drift for this thread
-            let thread_detail = services.threads().get_optional(&thread.thread_id)?;
-            let drift_result = if let Some(td) = &thread_detail {
-                calculate_drift(
-                    scm,
-                    &td.file_path,
-                    td.selection_start as u32,
-                    &td.commit_hash,
-                    &current_commit,
-                )
-                .unwrap_or(DriftResult::Unchanged {
-                    current_line: td.selection_start as u32,
-                })
-            } else {
-                DriftResult::Unchanged {
-                    current_line: thread.selection_start as u32,
-                }
-            };
-
-            let (current_line, drift_status) = match &drift_result {
-                DriftResult::Unchanged { current_line } => {
-                    (Some(i64::from(*current_line)), "unchanged".to_string())
-                }
-                DriftResult::Shifted {
-                    current_line,
-                    original_line,
-                } => {
-                    drift_count += 1;
-                    let delta = i64::from(*current_line) - i64::from(*original_line);
-                    let direction = if delta > 0 { "+" } else { "" };
-                    (
-                        Some(i64::from(*current_line)),
-                        format!("shifted({direction}{delta})"),
-                    )
-                }
-                DriftResult::Modified => {
-                    drift_count += 1;
-                    (None, "modified".to_string())
-                }
-                DriftResult::Deleted => {
-                    drift_count += 1;
-                    (None, "deleted".to_string())
-                }
-            };
-
-            thread_entries.push(ThreadStatusEntry {
-                thread_id: thread.thread_id.clone(),
-                file_path: thread.file_path.clone(),
-                original_line: thread.selection_start,
-                current_line,
-                drift_status,
-                status: thread.status.clone(),
-                comment_count: thread.comment_count,
-            });
-        }
-
-        let open_count = threads.iter().filter(|t| t.status == "open").count();
-
-        statuses.push(ReviewStatus {
-            review_id: review.review_id.clone(),
-            title: review.title.clone(),
-            status: review.status.clone(),
-            total_threads: threads.len(),
-            open_threads: open_count,
-            threads_with_drift: drift_count,
-            threads: thread_entries,
-        });
+        statuses.push(review_status(&services, scm, &review, unresolved_only)?);
     }
 
     // Build context-aware empty message
@@ -175,6 +107,66 @@ pub fn run_status(
     )?;
 
     Ok(())
+}
+
+/// Status of one review, with each thread located in the review target.
+fn review_status(
+    services: &SealServices,
+    scm: &dyn ScmRepo,
+    review: &ReviewDetail,
+    unresolved_only: bool,
+) -> Result<ReviewStatus> {
+    let status_filter = if unresolved_only { Some("open") } else { None };
+    let threads = services
+        .threads()
+        .list(&review.review_id, status_filter, None)?;
+
+    // Threads are located in the code the review shows now, which is the
+    // review target, not whatever the workspace has checked out.
+    let target_commit = resolve_target_commit(scm, review);
+    let mut locator = AnchorLocator::new(scm);
+    let mut thread_entries = Vec::new();
+    let mut drift_count = 0;
+
+    for thread in &threads {
+        let location = locator.locate(
+            &thread.file_path,
+            thread.selection_start,
+            thread.selection_end,
+            &thread.commit_hash,
+            &target_commit,
+        );
+        if location.status != AnchorStatus::Unchanged {
+            drift_count += 1;
+        }
+        thread_entries.push(thread_status_entry(thread, &location));
+    }
+
+    let open_count = threads.iter().filter(|t| t.status == "open").count();
+
+    Ok(ReviewStatus {
+        review_id: review.review_id.clone(),
+        title: review.title.clone(),
+        status: review.status.clone(),
+        total_threads: threads.len(),
+        open_threads: open_count,
+        threads_with_drift: drift_count,
+        threads: thread_entries,
+    })
+}
+
+fn thread_status_entry(thread: &ThreadSummary, location: &AnchorLocation) -> ThreadStatusEntry {
+    ThreadStatusEntry {
+        thread_id: thread.thread_id.clone(),
+        file_path: thread.file_path.clone(),
+        original_line: thread.selection_start,
+        current_line: location.current_start.map(i64::from),
+        current_line_end: location.current_end.map(i64::from),
+        drift_status: location.drift_label(),
+        outdated: location.is_outdated(),
+        status: thread.status.clone(),
+        comment_count: thread.comment_count,
+    }
 }
 
 /// Show diff for a review.
@@ -239,6 +231,19 @@ pub fn run_diff(
         .into_iter()
         .filter(|thread| !sealignore.is_ignored(&thread.file_path))
         .collect();
+    let mut locator = AnchorLocator::new(scm);
+    let thread_locations: Vec<AnchorLocation> = threads
+        .iter()
+        .map(|thread| {
+            locator.locate(
+                &thread.file_path,
+                thread.selection_start,
+                thread.selection_end,
+                &thread.commit_hash,
+                &target_commit,
+            )
+        })
+        .collect();
 
     // Build structured output
     // Say when the standing approval predates this code.
@@ -258,7 +263,7 @@ pub fn run_diff(
         "target_commit": target_commit,
         "changed_files": changed_files,
         "thread_count": threads.len(),
-        "threads_by_file": group_threads_by_file(&threads),
+        "threads_by_file": group_threads_by_file(&threads, &thread_locations),
         "diff": diff,
     });
 
@@ -274,29 +279,34 @@ fn extract_changed_files_from_diff(diff: &str) -> Vec<String> {
 }
 
 /// Group threads by file path.
-fn group_threads_by_file(threads: &[ThreadSummary]) -> serde_json::Value {
-    let mut by_file: std::collections::HashMap<String, Vec<&ThreadSummary>> =
-        std::collections::HashMap::new();
+///
+/// `line` stays the stored anchor line. `current_line`, `drift_status` and
+/// `outdated` say where that line is in the diffed target, so a thread whose
+/// lines changed is still listed, marked outdated.
+fn group_threads_by_file(
+    threads: &[ThreadSummary],
+    locations: &[AnchorLocation],
+) -> serde_json::Value {
+    let mut by_file: std::collections::BTreeMap<String, Vec<serde_json::Value>> =
+        std::collections::BTreeMap::new();
 
-    for thread in threads {
+    for (thread, location) in threads.iter().zip(locations) {
         by_file
             .entry(thread.file_path.clone())
             .or_default()
-            .push(thread);
+            .push(serde_json::json!({
+                "thread_id": thread.thread_id,
+                "line": thread.selection_start,
+                "current_line": location.current_start,
+                "drift_status": location.drift_label(),
+                "outdated": location.is_outdated(),
+                "status": thread.status,
+            }));
     }
 
     serde_json::json!(by_file
         .into_iter()
-        .map(|(file, threads)| {
-            serde_json::json!({
-                "file": file,
-                "threads": threads.iter().map(|t| serde_json::json!({
-                    "thread_id": t.thread_id,
-                    "line": t.selection_start,
-                    "status": t.status,
-                })).collect::<Vec<_>>()
-            })
-        })
+        .map(|(file, threads)| serde_json::json!({ "file": file, "threads": threads }))
         .collect::<Vec<_>>())
 }
 
@@ -305,6 +315,161 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    fn summary(id: &str, line: i64) -> ThreadSummary {
+        ThreadSummary {
+            thread_id: id.to_string(),
+            file_path: "f.txt".to_string(),
+            selection_start: line,
+            selection_end: None,
+            status: "open".to_string(),
+            comment_count: 1,
+            commit_hash: "c0ffee".to_string(),
+        }
+    }
+
+    fn location(status: AnchorStatus, original: u32, current: Option<u32>) -> AnchorLocation {
+        AnchorLocation {
+            status,
+            original_start: original,
+            original_end: original,
+            current_start: current,
+            current_end: current,
+            reason: None,
+        }
+    }
+
+    fn git(repo: &Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .current_dir(repo)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn file_text(lines: &[&str]) -> String {
+        let mut text = lines.join("\n");
+        text.push('\n');
+        text
+    }
+
+    /// `seal status` measures drift against the review target. The workspace
+    /// here sits on trunk, where the commented feature line does not exist
+    /// at all; the review target (after rebase + retarget) has it two lines
+    /// lower than where it was commented.
+    #[test]
+    fn status_locates_threads_in_the_review_target_not_the_workspace_commit() {
+        use seal_core::core::CoreContext;
+        use seal_core::events::CodeSelection;
+        use seal_core::scm::git::GitRepo;
+
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        git(root, &["init", "-q"]);
+        git(root, &["config", "user.email", "test@example.com"]);
+        git(root, &["config", "user.name", "Test User"]);
+        fs::write(root.join(".git/info/exclude"), ".seal/\n").unwrap();
+        fs::write(root.join("f.txt"), file_text(&["a", "b", "c"])).unwrap();
+        git(root, &["add", "f.txt"]);
+        git(root, &["commit", "-qm", "base"]);
+        git(root, &["branch", "-M", "main"]);
+        git(root, &["checkout", "-q", "--detach"]);
+        fs::write(root.join("f.txt"), file_text(&["a", "b", "c", "feature"])).unwrap();
+        git(root, &["commit", "-qam", "feature"]);
+
+        let seal_dir = root.join(".seal");
+        fs::create_dir_all(seal_dir.join("reviews")).unwrap();
+        fs::write(seal_dir.join("version"), "2\n").unwrap();
+        let ctx = CoreContext::new(root, &seal_dir.join("index.db")).unwrap();
+        let scm = GitRepo::new(root.to_path_buf());
+        let target = scm.current_commit().unwrap();
+        let base = seal_core::range::resolve_new_review_base(&scm, &target, None).unwrap();
+        let review_id = ctx
+            .services()
+            .unwrap()
+            .reviews()
+            .create(&scm, "T".to_string(), None, None, Some("alice"), Some(base))
+            .unwrap();
+        ctx.services()
+            .unwrap()
+            .threads()
+            .create(
+                &review_id,
+                "f.txt",
+                CodeSelection::line(4),
+                target.clone(),
+                Some("alice"),
+            )
+            .unwrap();
+
+        // Trunk inserts two lines at the top; rebase and retarget.
+        git(root, &["checkout", "-q", "main"]);
+        fs::write(root.join("f.txt"), file_text(&["t1", "t2", "a", "b", "c"])).unwrap();
+        git(root, &["commit", "-qam", "trunk"]);
+        git(root, &["checkout", "-q", "--detach", &target]);
+        git(root, &["rebase", "-q", "main"]);
+        ctx.services()
+            .unwrap()
+            .reviews()
+            .retarget(&scm, &review_id, Some("alice"), None)
+            .unwrap();
+
+        // Move the workspace off the review target, onto trunk.
+        git(root, &["checkout", "-q", "--detach", "main"]);
+        assert_ne!(
+            scm.current_commit().unwrap(),
+            resolve_target_commit(
+                &scm,
+                &ctx.services().unwrap().reviews().get(&review_id).unwrap()
+            )
+        );
+
+        let services = ctx.services().unwrap();
+        let review = services.reviews().get(&review_id).unwrap();
+        let status = review_status(&services, &scm, &review, false).unwrap();
+        assert_eq!(status.threads.len(), 1);
+        let thread = &status.threads[0];
+        assert_eq!(thread.original_line, 4);
+        assert_eq!(thread.current_line, Some(6));
+        assert_eq!(thread.drift_status, "shifted(+2)");
+        assert!(!thread.outdated);
+    }
+
+    #[test]
+    fn outdated_threads_stay_listed_and_marked_in_status_and_diff() {
+        let threads = [summary("th-shifted", 5), summary("th-edited", 9)];
+        let locations = [
+            location(AnchorStatus::Shifted, 5, Some(7)),
+            location(AnchorStatus::Modified, 9, None),
+        ];
+
+        let shifted = thread_status_entry(&threads[0], &locations[0]);
+        assert_eq!(shifted.current_line, Some(7));
+        assert_eq!(shifted.drift_status, "shifted(+2)");
+        assert!(!shifted.outdated);
+        let edited = thread_status_entry(&threads[1], &locations[1]);
+        assert_eq!(edited.current_line, None);
+        assert_eq!(edited.original_line, 9);
+        assert_eq!(edited.drift_status, "modified");
+        assert!(edited.outdated);
+
+        let grouped = group_threads_by_file(&threads, &locations);
+        let listed = grouped[0]["threads"].as_array().expect("threads");
+        assert_eq!(listed.len(), 2, "no thread is dropped");
+        assert_eq!(listed[0]["line"], 5);
+        assert_eq!(listed[0]["current_line"], 7);
+        assert_eq!(listed[0]["outdated"], false);
+        assert_eq!(listed[1]["thread_id"], "th-edited");
+        assert_eq!(listed[1]["line"], 9);
+        assert!(listed[1]["current_line"].is_null());
+        assert_eq!(listed[1]["drift_status"], "modified");
+        assert_eq!(listed[1]["outdated"], true);
+    }
 
     #[test]
     fn test_extract_changed_files_from_diff_allows_spaces() {

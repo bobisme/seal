@@ -349,17 +349,25 @@ pub fn calculate_drift(
     // Parse the hunks
     let hunks = parse_hunks(&diff)?;
 
-    // If no hunks, file is unchanged (diff might have only header)
-    if hunks.is_empty() {
-        return Ok(DriftResult::Unchanged {
-            current_line: original_line,
-        });
-    }
+    drift_through_hunks(&hunks, original_line)
+}
 
+/// Map one line of the old file through the parsed hunks of a single-file
+/// diff. An empty hunk list means the file did not change.
+///
+/// This is the pure core of [`calculate_drift`]: it never touches the SCM,
+/// so callers that locate many anchors in the same file can parse the diff
+/// once and map every anchor through it.
+///
+/// # Errors
+///
+/// Returns an error only for a hunk header that cannot describe a real
+/// hunk (a span or line counter that overflows `u32`).
+pub fn drift_through_hunks(hunks: &[Hunk], original_line: u32) -> Result<DriftResult> {
     // Track how the original line number shifts through each hunk
     let mut current_line = original_line;
 
-    for hunk in &hunks {
+    for hunk in hunks {
         // Check if this hunk affects lines before or at our target line.
         // Special handling for old_count=0 (pure-addition or new-file hunks):
         // When old_count=0, the hunk doesn't consume any old lines, so the
@@ -449,6 +457,150 @@ pub fn calculate_drift(
             original_line,
             current_line,
         })
+    }
+}
+
+/// Where an anchored, inclusive line range lives after a diff.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RangeDrift {
+    /// Every line of the range survives unmodified and the lines stay
+    /// contiguous. `start`/`end` are the range's lines in the new file.
+    Mapped {
+        /// First line of the range in the new file.
+        start: u32,
+        /// Last line of the range in the new file.
+        end: u32,
+    },
+    /// At least one line of the range was edited or removed, or new lines
+    /// were inserted inside the range, but not every line was removed.
+    Modified,
+    /// Every line of the range was removed.
+    Deleted,
+}
+
+/// For each line of a hunk body, whether the contiguous change block it
+/// belongs to contains an addition. One pass each way, so O(body length);
+/// the per-line [`change_block_contains_addition`] rescans the block.
+fn blocks_with_addition(lines: &[DiffLine]) -> Vec<bool> {
+    let mut result = vec![false; lines.len()];
+    let mut block_start = 0;
+    while block_start < lines.len() {
+        if matches!(lines[block_start], DiffLine::Context) {
+            block_start += 1;
+            continue;
+        }
+        let mut block_end = block_start;
+        while block_end < lines.len() && !matches!(lines[block_end], DiffLine::Context) {
+            block_end += 1;
+        }
+        let has_addition = lines[block_start..block_end]
+            .iter()
+            .any(|line| matches!(line, DiffLine::Added));
+        result[block_start..block_end].fill(has_addition);
+        block_start = block_end;
+    }
+    result
+}
+
+/// Map an inclusive line range of the old file through the parsed hunks of
+/// a single-file diff.
+///
+/// The range maps only when every line in it maps and the mapped lines are
+/// still contiguous; an insertion inside the range, or any edited line,
+/// makes it [`RangeDrift::Modified`]. `start > end` is treated as the range
+/// `end..=start`.
+///
+/// The cost is linear in the diff (hunk headers plus the bodies of hunks
+/// that overlap the range) and independent of the range length. Stored
+/// selections come from event logs anyone can commit, so a range such as
+/// `1..=u32::MAX` must not cost billions of steps. The test-only
+/// `drift_range_per_line` oracle maps line by line; a proptest checks that
+/// both agree on well-formed diffs.
+///
+/// How: the endpoints are mapped exactly with [`drift_through_hunks`]. Lines
+/// outside every hunk's old-file span only move by an offset, so they cannot
+/// break the range. Inside the spans, the hunk bodies say which range lines
+/// were removed (a deletion, or a line a header claims but the body lacks).
+/// With no such line and a monotone mapping, the range is contiguous
+/// exactly when its mapped length equals its original length; an insertion
+/// strictly inside the range makes the mapped range longer.
+///
+/// # Errors
+///
+/// Returns an error only when [`drift_through_hunks`] does (a hunk header
+/// or body that cannot describe a real hunk).
+pub fn drift_range_through_hunks(hunks: &[Hunk], start: u32, end: u32) -> Result<RangeDrift> {
+    let (start, end) = if start <= end {
+        (start, end)
+    } else {
+        (end, start)
+    };
+
+    let first = drift_through_hunks(hunks, start)?.current_line();
+    let last = drift_through_hunks(hunks, end)?.current_line();
+
+    // Range lines that do not survive, and how many of them are pure
+    // deletions (a deletion whose change block adds nothing).
+    let mut any_removed = false;
+    let mut deleted: u64 = 0;
+
+    for hunk in hunks {
+        let old_end =
+            hunk_old_end(hunk.header.old_start, hunk.header.old_count).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "hunk header describes an old-file span that does not fit in u32: \
+                 old_start={}, old_count={}",
+                    hunk.header.old_start,
+                    hunk.header.old_count
+                )
+            })?;
+        if hunk.header.old_count == 0 || hunk.header.old_start > end || old_end < start {
+            continue;
+        }
+
+        let has_addition = blocks_with_addition(&hunk.lines);
+        let mut old_line = hunk.header.old_start;
+        let mut new_line = hunk.header.new_start;
+        for (index, diff_line) in hunk.lines.iter().enumerate() {
+            if old_line > end {
+                break;
+            }
+            if matches!(diff_line, DiffLine::Deleted) && old_line >= start {
+                any_removed = true;
+                if !has_addition[index] {
+                    deleted += 1;
+                }
+            }
+            (old_line, new_line) =
+                advance_hunk_line(old_line, new_line, diff_line).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "hunk line walk overflowed u32 counters: old_line={old_line}, \
+                         new_line={new_line}"
+                    )
+                })?;
+        }
+
+        // Old lines the header claims but the body never reached cannot be
+        // located, so they count as modified.
+        if old_line <= old_end && old_line <= end && old_end >= start {
+            any_removed = true;
+        }
+    }
+
+    let length = u64::from(end) - u64::from(start) + 1;
+    if deleted == length {
+        return Ok(RangeDrift::Deleted);
+    }
+    match (any_removed, first, last) {
+        (false, Some(first), Some(last))
+            if last >= first && u64::from(last - first) + 1 == length =>
+        {
+            Ok(RangeDrift::Mapped {
+                start: first,
+                end: last,
+            })
+        }
+        _ => Ok(RangeDrift::Modified),
     }
 }
 
@@ -1274,6 +1426,223 @@ new file mode 100644
                     );
                 }
                 prev_current_line = Some(current_line);
+            }
+        }
+    }
+
+    /// Test-only oracle: map a range one line at a time. Obviously correct,
+    /// but O(range length), so production uses `drift_range_through_hunks`.
+    fn drift_range_per_line(hunks: &[Hunk], start: u32, end: u32) -> Result<RangeDrift> {
+        let (start, end) = if start <= end {
+            (start, end)
+        } else {
+            (end, start)
+        };
+
+        let mut first: Option<u32> = None;
+        let mut last: Option<u32> = None;
+        let mut intact = true;
+        let mut any_survivor_or_edit = false;
+
+        for line in start..=end {
+            match drift_through_hunks(hunks, line)? {
+                DriftResult::Unchanged { current_line }
+                | DriftResult::Shifted { current_line, .. } => {
+                    any_survivor_or_edit = true;
+                    if let Some(previous) = last {
+                        if previous.checked_add(1) != Some(current_line) {
+                            intact = false;
+                        }
+                    }
+                    first.get_or_insert(current_line);
+                    last = Some(current_line);
+                }
+                DriftResult::Modified => {
+                    any_survivor_or_edit = true;
+                    intact = false;
+                }
+                DriftResult::Deleted => intact = false,
+            }
+        }
+
+        if !any_survivor_or_edit {
+            return Ok(RangeDrift::Deleted);
+        }
+        match (intact, first, last) {
+            (true, Some(start), Some(end)) => Ok(RangeDrift::Mapped { start, end }),
+            _ => Ok(RangeDrift::Modified),
+        }
+    }
+
+    /// Build a git-like multi-hunk diff from an edit script: only changes
+    /// plus `context` unchanged lines around them become hunks, so lines
+    /// between hunks are mapped by offset alone. `context >= 1` keeps every
+    /// hunk's old side non-empty, as git's default output does.
+    fn build_multi_hunk_diff(keep: &[bool], inserts: &[usize], context: usize) -> String {
+        use std::fmt::Write as _;
+        // (kind, text) in file order.
+        let mut ops: Vec<(DiffLine, String)> = Vec::new();
+        let mut fresh = 0usize;
+        for gap in 0..=keep.len() {
+            for _ in 0..inserts[gap] {
+                ops.push((DiffLine::Added, format!("new{fresh}")));
+                fresh += 1;
+            }
+            if gap < keep.len() {
+                let kind = if keep[gap] {
+                    DiffLine::Context
+                } else {
+                    DiffLine::Deleted
+                };
+                ops.push((kind, format!("old{}", gap + 1)));
+            }
+        }
+
+        let changed: Vec<usize> = ops
+            .iter()
+            .enumerate()
+            .filter(|(_, (kind, _))| !matches!(kind, DiffLine::Context))
+            .map(|(index, _)| index)
+            .collect();
+        let needed: Vec<bool> = (0..ops.len())
+            .map(|index| changed.iter().any(|c| c.abs_diff(index) <= context))
+            .collect();
+
+        let mut diff =
+            String::from("diff --git a/test.rs b/test.rs\n--- a/test.rs\n+++ b/test.rs\n");
+        let (mut old_line, mut new_line) = (1usize, 1usize);
+        let mut index = 0;
+        while index < ops.len() {
+            if !needed[index] {
+                // Unchanged line outside every hunk.
+                old_line += 1;
+                new_line += 1;
+                index += 1;
+                continue;
+            }
+            let (old_start, new_start) = (old_line, new_line);
+            let mut body = String::new();
+            while index < ops.len() && needed[index] {
+                let (kind, text) = &ops[index];
+                let prefix = match kind {
+                    DiffLine::Context => {
+                        old_line += 1;
+                        new_line += 1;
+                        ' '
+                    }
+                    DiffLine::Deleted => {
+                        old_line += 1;
+                        '-'
+                    }
+                    DiffLine::Added => {
+                        new_line += 1;
+                        '+'
+                    }
+                };
+                body.push(prefix);
+                body.push_str(text);
+                body.push('\n');
+                index += 1;
+            }
+            let (old_count, new_count) = (old_line - old_start, new_line - new_start);
+            writeln!(
+                diff,
+                "@@ -{old_start},{old_count} +{new_start},{new_count} @@"
+            )
+            .expect("write to String");
+            diff.push_str(&body);
+        }
+        diff
+    }
+
+    #[test]
+    fn huge_range_over_a_small_diff_is_instant() {
+        // Line 5 of a 10-line file is replaced.
+        let edit = "@@ -3,5 +3,5 @@\n a\n b\n-c\n+C\n d\n e\n";
+        let hunks = parse_hunks(edit).unwrap();
+        let started = std::time::Instant::now();
+        assert_eq!(
+            drift_range_through_hunks(&hunks, 1, u32::MAX).unwrap(),
+            RangeDrift::Modified
+        );
+        // Line 1 is deleted: a range below it maps up by one.
+        let deletion = "@@ -1,2 +1,1 @@\n-x\n y\n";
+        let hunks = parse_hunks(deletion).unwrap();
+        assert_eq!(
+            drift_range_through_hunks(&hunks, 3, u32::MAX).unwrap(),
+            RangeDrift::Mapped {
+                start: 2,
+                end: u32::MAX - 1
+            }
+        );
+        assert_eq!(
+            drift_range_through_hunks(&hunks, u32::MAX, 1).unwrap(),
+            RangeDrift::Modified
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "range mapping must not depend on range length"
+        );
+    }
+
+    proptest! {
+        /// A range maps exactly when every line in it survives and no fresh
+        /// line is inserted between two of its lines, and a mapped range
+        /// holds exactly the original text. A range whose every line is
+        /// removed is never reported as mapped. The fast mapping equals the
+        /// per-line oracle, on single-hunk and git-like multi-hunk diffs.
+        #[test]
+        fn range_maps_iff_its_lines_survive_contiguously(
+            ((keep, inserts), bounds, context) in edit_script_strategy().prop_flat_map(|script| {
+                let len = script.0.len() as u32;
+                // Endpoints may run past the end of the file.
+                (Just(script), (1..=len + 2, 1..=len + 2), 0usize..=3)
+            })
+        ) {
+            let (start, end) = (bounds.0.min(bounds.1), bounds.0.max(bounds.1));
+            let (single, old_file, new_file) = build_diff_from_edit_script(&keep, &inserts);
+            let diff = if context == 0 {
+                single
+            } else {
+                build_multi_hunk_diff(&keep, &inserts, context)
+            };
+            let hunks = parse_hunks(&diff).expect("well-formed diff");
+            let drift = drift_range_through_hunks(&hunks, start, end).expect("no overflow");
+            prop_assert_eq!(
+                &drift,
+                &drift_range_per_line(&hunks, start, end).expect("no overflow"),
+                "fast mapping disagrees with the per-line oracle on\n{}",
+                diff
+            );
+            // Reversed bounds describe the same range.
+            prop_assert_eq!(
+                &drift,
+                &drift_range_through_hunks(&hunks, end, start).expect("no overflow")
+            );
+
+            let old_len = keep.len() as u32;
+            if end > old_len {
+                // Past the end of the old file there is no text to compare.
+                return Ok(());
+            }
+            let lines = (start as usize - 1)..(end as usize);
+            let all_kept = keep[lines.clone()].iter().all(|kept| *kept);
+            // Gap g lies right after old line g, so the gaps inside the range
+            // are start..end.
+            let inner_inserts = inserts[start as usize..end as usize].iter().any(|n| *n > 0);
+            let contiguous = all_kept && !inner_inserts;
+            let none_kept = keep[lines.clone()].iter().all(|kept| !*kept);
+
+            match drift {
+                RangeDrift::Mapped { start: new_start, end: new_end } => {
+                    prop_assert!(contiguous);
+                    prop_assert_eq!(
+                        &new_file[new_start as usize - 1..new_end as usize],
+                        &old_file[lines]
+                    );
+                }
+                RangeDrift::Modified => prop_assert!(!contiguous),
+                RangeDrift::Deleted => prop_assert!(none_kept),
             }
         }
     }

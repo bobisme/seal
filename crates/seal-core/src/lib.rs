@@ -3,6 +3,7 @@
 //! This crate owns event model, append-log storage, projection queries,
 //! SCM abstraction, and shared domain types.
 
+pub mod anchor;
 pub mod approval_exempt;
 pub mod core;
 pub mod events;

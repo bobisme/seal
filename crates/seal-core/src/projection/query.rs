@@ -76,6 +76,11 @@ pub struct ThreadSummary {
     pub selection_end: Option<i64>,
     pub status: String,
     pub comment_count: i64,
+    /// The commit the thread's lines refer to. Readers map the lines from
+    /// here to the review's current target (see `crate::anchor`). Not
+    /// serialized, so list output keeps its existing shape.
+    #[serde(skip_serializing)]
+    pub commit_hash: String,
 }
 
 /// Full details of a thread with comments.
@@ -345,7 +350,8 @@ impl ProjectionDb {
         file: Option<&str>,
     ) -> Result<Vec<ThreadSummary>> {
         let mut sql = String::from(
-            "SELECT thread_id, file_path, selection_start, selection_end, effective_status, comment_count
+            "SELECT thread_id, file_path, selection_start, selection_end, effective_status, comment_count,
+                    commit_hash
              FROM v_threads_detail
              WHERE review_id = ?",
         );
@@ -382,6 +388,7 @@ impl ProjectionDb {
                     selection_end: row.get(3)?,
                     status: row.get(4)?,
                     comment_count: row.get(5)?,
+                    commit_hash: row.get(6)?,
                 })
             })
             .context("Failed to execute list_threads query")?;

@@ -6,6 +6,7 @@ use std::path::Path;
 
 use crate::cli::commands::helpers::{ensure_initialized, open_services};
 use crate::output::{Formatter, OutputFormat};
+use seal_core::anchor::{AnchorLocation, AnchorLocator, AnchorStatus};
 use seal_core::events::VoteType;
 use seal_core::projection::{ReviewDetail, ThreadSummary};
 use seal_core::range::{
@@ -741,6 +742,7 @@ pub fn run_review(
 
         // Determine commit for context (same logic as text/pretty output)
         let commit_ref = resolve_target_commit(scm, &review);
+        let mut locator = AnchorLocator::new(scm);
 
         // Pre-fetch file contents for all thread files (one show_file per unique file)
         let mut file_cache: std::collections::HashMap<String, String> =
@@ -775,19 +777,24 @@ pub fn run_review(
                 continue;
             }
 
-            // Extract code context from cached file contents
-            let anchor_start = thread.selection_start as u32;
-            let anchor_end = thread.selection_end.unwrap_or(thread.selection_start) as u32;
-
-            let context_value = if context_lines > 0 {
-                file_cache
-                    .get(&thread.file_path)
-                    .and_then(|contents| {
-                        extract_context_from_str(contents, anchor_start, anchor_end, context_lines)
-                    })
-                    .and_then(|ctx| serde_json::to_value(&ctx).ok())
-            } else {
-                None
+            // Show the thread's lines where they are in the target. An
+            // outdated thread shows the code it was written against instead.
+            let location = locate_thread(&mut locator, thread, &commit_ref);
+            let source = context_source(thread, &location, &commit_ref);
+            let context_value = match &source {
+                Some((commit, start, end)) if context_lines > 0 => {
+                    let contents = if *commit == commit_ref {
+                        file_cache.get(&thread.file_path).cloned()
+                    } else {
+                        scm.show_file(commit, &thread.file_path).ok()
+                    };
+                    contents
+                        .and_then(|contents| {
+                            extract_context_from_str(&contents, *start, *end, context_lines)
+                        })
+                        .and_then(|ctx| serde_json::to_value(&ctx).ok())
+                }
+                _ => None,
             };
 
             threads_with_comments.push(serde_json::json!({
@@ -795,8 +802,15 @@ pub fn run_review(
                 "file_path": thread.file_path,
                 "selection_start": thread.selection_start,
                 "selection_end": thread.selection_end,
+                "anchor_commit": thread.commit_hash,
+                "current_selection_start": location.current_start,
+                "current_selection_end": location.current_end,
+                "drift_status": location.drift_label(),
+                "outdated": location.is_outdated(),
+                "outdated_reason": location.reason,
                 "status": thread.status,
                 "context": context_value,
+                "context_commit": context_value.as_ref().and_then(|_| source.map(|(commit, _, _)| commit)),
                 "comments": filtered_comments,
             }));
         }
@@ -808,8 +822,16 @@ pub fn run_review(
 
         // Include per-file diffs when requested
         if include_diffs {
-            let files_value =
-                build_file_diffs(scm, &review, &threads, &commit_ref, &file_cache, seal_root);
+            let current = threads_at_current_lines(&mut locator, &threads, &commit_ref);
+            let files_value = build_file_diffs(
+                scm,
+                &review,
+                &threads,
+                &current,
+                &commit_ref,
+                &file_cache,
+                seal_root,
+            );
             result["files"] = files_value;
         }
 
@@ -858,6 +880,8 @@ pub fn run_review(
 
     // Determine commit for context/diff rendering
     let commit_ref = resolve_target_commit(scm, &review);
+    let mut locator = AnchorLocator::new(scm);
+    let current_threads = threads_at_current_lines(&mut locator, &threads, &commit_ref);
 
     // Pre-fetch file contents for thread files when include_diffs is requested.
     let mut file_cache: std::collections::HashMap<String, String> =
@@ -874,7 +898,15 @@ pub fn run_review(
 
     if threads.is_empty() {
         if include_diffs {
-            print_file_diffs_text(scm, &review, &threads, &commit_ref, &file_cache, seal_root);
+            print_file_diffs_text(
+                scm,
+                &review,
+                &threads,
+                &current_threads,
+                &commit_ref,
+                &file_cache,
+                seal_root,
+            );
         } else {
             println!("\n  No threads yet. Use seal diff {review_id} to view changes.");
         }
@@ -935,12 +967,8 @@ pub fn run_review(
             } else {
                 "✓"
             };
-            let line_info = match thread.selection_end {
-                Some(end) if end != thread.selection_start => {
-                    format!("lines {}-{}", thread.selection_start, end)
-                }
-                _ => format!("line {}", thread.selection_start),
-            };
+            let location = locate_thread(&mut locator, &thread, &commit_ref);
+            let line_info = thread_line_label(&thread, &location);
 
             let new_indicator = if since.is_some() {
                 format!(" [+{}]", comments.len())
@@ -953,22 +981,22 @@ pub fn run_review(
                 status_icon, thread.thread_id, line_info, new_indicator
             );
 
-            // Show code context if requested
+            // Show code context if requested: the thread's lines in the
+            // target, or for an outdated thread the code it was written on.
             if context_lines > 0 {
-                let anchor_start = thread.selection_start as u32;
-                let anchor_end = thread.selection_end.unwrap_or(thread.selection_start) as u32;
-
-                if let Ok(ctx) = extract_context(
-                    scm,
-                    &file,
-                    &commit_ref,
-                    anchor_start,
-                    anchor_end,
-                    context_lines,
-                ) {
-                    // Indent the context
-                    for line in format_context(&ctx).lines() {
-                        println!("  {line}");
+                if let Some((commit, anchor_start, anchor_end)) =
+                    context_source(&thread, &location, &commit_ref)
+                {
+                    if let Ok(ctx) =
+                        extract_context(scm, &file, commit, anchor_start, anchor_end, context_lines)
+                    {
+                        if commit != commit_ref {
+                            println!("    (code as commented, at {})", short_commit(commit));
+                        }
+                        // Indent the context
+                        for line in format_context(&ctx).lines() {
+                            println!("  {line}");
+                        }
                     }
                 }
             }
@@ -992,7 +1020,15 @@ pub fn run_review(
     }
 
     if include_diffs {
-        print_file_diffs_text(scm, &review, &threads, &commit_ref, &file_cache, seal_root);
+        print_file_diffs_text(
+            scm,
+            &review,
+            &threads,
+            &current_threads,
+            &commit_ref,
+            &file_cache,
+            seal_root,
+        );
     }
 
     println!();
@@ -1003,11 +1039,20 @@ fn print_file_diffs_text(
     scm: &dyn ScmRepo,
     review: &ReviewDetail,
     threads: &[ThreadSummary],
+    current_threads: &[ThreadSummary],
     commit_ref: &str,
     file_cache: &std::collections::HashMap<String, String>,
     seal_root: &Path,
 ) {
-    let files_value = build_file_diffs(scm, review, threads, commit_ref, file_cache, seal_root);
+    let files_value = build_file_diffs(
+        scm,
+        review,
+        threads,
+        current_threads,
+        commit_ref,
+        file_cache,
+        seal_root,
+    );
     let Some(files) = files_value.as_array() else {
         return;
     };
@@ -1188,6 +1233,97 @@ fn extract_context_from_str(
     })
 }
 
+/// Locate a thread's anchor in `target_commit`.
+fn locate_thread(
+    locator: &mut AnchorLocator<'_>,
+    thread: &ThreadSummary,
+    target_commit: &str,
+) -> AnchorLocation {
+    locator.locate(
+        &thread.file_path,
+        thread.selection_start,
+        thread.selection_end,
+        &thread.commit_hash,
+        target_commit,
+    )
+}
+
+/// The threads whose lines are intact in `target_commit`, with their
+/// selection moved to where those lines are now. Outdated threads are left
+/// out: they have no lines in the target.
+fn threads_at_current_lines(
+    locator: &mut AnchorLocator<'_>,
+    threads: &[ThreadSummary],
+    target_commit: &str,
+) -> Vec<ThreadSummary> {
+    threads
+        .iter()
+        .filter_map(|thread| {
+            let location = locate_thread(locator, thread, target_commit);
+            let start = location.current_start?;
+            let end = location.current_end?;
+            let mut moved = thread.clone();
+            moved.selection_start = i64::from(start);
+            moved.selection_end = thread.selection_end.map(|_| i64::from(end));
+            Some(moved)
+        })
+        .collect()
+}
+
+/// Where to read the code a thread is about: `(commit, first, last line)`.
+///
+/// An intact anchor reads the target at its current lines. A modified or
+/// deleted anchor reads the thread's own commit at its original lines, so the
+/// reader sees what was commented on. An unknown anchor has no code to show.
+const fn context_source<'a>(
+    thread: &'a ThreadSummary,
+    location: &AnchorLocation,
+    target_commit: &'a str,
+) -> Option<(&'a str, u32, u32)> {
+    match (
+        location.status,
+        location.current_start,
+        location.current_end,
+    ) {
+        (AnchorStatus::Unchanged | AnchorStatus::Shifted, Some(start), Some(end)) => {
+            Some((target_commit, start, end))
+        }
+        (AnchorStatus::Modified | AnchorStatus::Deleted, _, _) => Some((
+            thread.commit_hash.as_str(),
+            location.original_start,
+            location.original_end,
+        )),
+        _ => None,
+    }
+}
+
+/// Human label for a thread's lines, e.g. `line 7, was 5` or
+/// `line 5, outdated: modified`.
+fn thread_line_label(thread: &ThreadSummary, location: &AnchorLocation) -> String {
+    let lines = |start: i64, end: Option<i64>| match end {
+        Some(end) if end != start => format!("lines {start}-{end}"),
+        _ => format!("line {start}"),
+    };
+    let original = lines(thread.selection_start, thread.selection_end);
+    match (location.status, location.current_start) {
+        (AnchorStatus::Shifted, Some(start)) => {
+            let current = lines(
+                i64::from(start),
+                thread
+                    .selection_end
+                    .and_then(|_| location.current_end.map(i64::from)),
+            );
+            format!("{current}, was {}", thread.selection_start)
+        }
+        (AnchorStatus::Unchanged | AnchorStatus::Shifted, _) => original,
+        (AnchorStatus::Unknown, _) => format!(
+            "{original}, outdated: cannot map from {}",
+            short_commit(&thread.commit_hash)
+        ),
+        _ => format!("{original}, outdated: {}", location.drift_label()),
+    }
+}
+
 /// Content window around an orphaned thread's anchor.
 #[derive(serde::Serialize)]
 struct ContentWindow {
@@ -1208,6 +1344,7 @@ fn build_file_diffs(
     scm: &dyn ScmRepo,
     review: &ReviewDetail,
     threads: &[ThreadSummary],
+    current_threads: &[ThreadSummary],
     target_commit: &str,
     file_cache: &std::collections::HashMap<String, String>,
     seal_root: &Path,
@@ -1246,8 +1383,9 @@ fn build_file_diffs(
             .get(file_path.as_str())
             .map(std::string::ToString::to_string);
 
-        // Get threads for this file
-        let file_threads: Vec<&ThreadSummary> = threads
+        // Get this file's threads at their lines in the target. Outdated
+        // threads have no lines there, so they add no content window.
+        let file_threads: Vec<&ThreadSummary> = current_threads
             .iter()
             .filter(|t| &t.file_path == file_path)
             .collect();
@@ -1424,7 +1562,93 @@ mod diff_tests {
             selection_end: end,
             status: "open".to_string(),
             comment_count: 1,
+            commit_hash: "c0ffee".to_string(),
         }
+    }
+
+    fn location(
+        status: AnchorStatus,
+        original: (u32, u32),
+        current: Option<(u32, u32)>,
+    ) -> AnchorLocation {
+        AnchorLocation {
+            status,
+            original_start: original.0,
+            original_end: original.1,
+            current_start: current.map(|c| c.0),
+            current_end: current.map(|c| c.1),
+            reason: (status == AnchorStatus::Unknown).then(|| "gone".to_string()),
+        }
+    }
+
+    #[test]
+    fn line_label_says_where_a_thread_is_now_or_that_it_is_outdated() {
+        let single = thread("f.txt", 5, None);
+        let range = thread("f.txt", 5, Some(7));
+        let cases = [
+            (
+                &single,
+                location(AnchorStatus::Unchanged, (5, 5), Some((5, 5))),
+                "line 5",
+            ),
+            (
+                &single,
+                location(AnchorStatus::Shifted, (5, 5), Some((8, 8))),
+                "line 8, was 5",
+            ),
+            (
+                &range,
+                location(AnchorStatus::Shifted, (5, 7), Some((8, 10))),
+                "lines 8-10, was 5",
+            ),
+            (
+                &single,
+                location(AnchorStatus::Modified, (5, 5), None),
+                "line 5, outdated: modified",
+            ),
+            (
+                &range,
+                location(AnchorStatus::Deleted, (5, 7), None),
+                "lines 5-7, outdated: deleted",
+            ),
+            (
+                &single,
+                location(AnchorStatus::Unknown, (5, 5), None),
+                "line 5, outdated: cannot map from c0ffee",
+            ),
+        ];
+        for (thread, location, expected) in cases {
+            assert_eq!(thread_line_label(thread, &location), expected);
+        }
+    }
+
+    #[test]
+    fn context_source_reads_target_when_intact_and_anchor_commit_when_outdated() {
+        let t = thread("f.txt", 5, None);
+        assert_eq!(
+            context_source(
+                &t,
+                &location(AnchorStatus::Shifted, (5, 5), Some((8, 8))),
+                "target"
+            ),
+            Some(("target", 8, 8))
+        );
+        assert_eq!(
+            context_source(
+                &t,
+                &location(AnchorStatus::Modified, (5, 5), None),
+                "target"
+            ),
+            Some(("c0ffee", 5, 5))
+        );
+        assert_eq!(
+            context_source(&t, &location(AnchorStatus::Deleted, (5, 5), None), "target"),
+            Some(("c0ffee", 5, 5))
+        );
+        assert_eq!(
+            context_source(&t, &location(AnchorStatus::Unknown, (5, 5), None), "target"),
+            None
+        );
     }
 
     #[test]
