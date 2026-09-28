@@ -221,13 +221,72 @@ impl ApprovalCoverage {
 /// fresh; anything else, including an approved commit that no longer
 /// resolves, is stale. No commit count is reported for such a pair, since
 /// the distance between unrelated commits means nothing.
+///
+/// The approval is checked against [`effective_approval_target`], not only
+/// the anchored review target. Use [`approval_coverage_at`] to check it
+/// against one exact commit, such as the commit a merge records.
 #[must_use]
 pub fn approval_coverage(scm: &dyn ScmRepo, review: &ReviewDetail) -> Option<ApprovalCoverage> {
     if review.status != "approved" {
         return None;
     }
+    let target = effective_approval_target(scm, review);
+    approval_coverage_at(scm, review, &target)
+}
 
-    let current_target = resolve_target_commit(scm, review);
+/// The commit an approval must cover when seen from the current workspace.
+///
+/// This is the workspace's current commit when it equals or descends from
+/// the anchored review target ([`resolve_target_commit`]). Otherwise, and for
+/// a merged review, it is the anchored target.
+///
+/// Why: the workspace is where the next merge comes from. A detached HEAD
+/// (a git worktree, such as a maw workspace) anchors the review to a fixed
+/// commit, and a jj change anchor stays behind after `jj new`. New commits
+/// then land on top of the anchor without moving it, and a check against the
+/// anchor alone reports an approval as fresh while unreviewed code sits in
+/// the workspace, ready to merge (bn-2ypz).
+///
+/// A checkout that does not descend from the anchor (trunk before the merge,
+/// another reviewer's workspace) cannot merge that code, so the anchor
+/// decides. Any failure to read or compare the current commit also falls
+/// back to the anchor, which is the behaviour before this rule.
+///
+/// Only the approval check uses this target. The review range, the diff and
+/// thread locations still use the anchored target.
+#[must_use]
+pub fn effective_approval_target(scm: &dyn ScmRepo, review: &ReviewDetail) -> String {
+    let anchored = resolve_target_commit(scm, review);
+    if review.final_commit.is_some() {
+        return anchored;
+    }
+    let Ok(head) = scm.current_commit() else {
+        return anchored;
+    };
+    if head == anchored || scm.is_ancestor(&anchored, &head).unwrap_or(false) {
+        head
+    } else {
+        anchored
+    }
+}
+
+/// Check whether a review's approval covers one exact commit.
+///
+/// Same rules as [`approval_coverage`], with `target` as the code the
+/// approval must cover. `seal reviews mark-merged` passes the commit it
+/// records as `final_commit`, so the gate checks exactly the code that
+/// merges. Returns `None` for reviews that are not approved.
+#[must_use]
+pub fn approval_coverage_at(
+    scm: &dyn ScmRepo,
+    review: &ReviewDetail,
+    target: &str,
+) -> Option<ApprovalCoverage> {
+    if review.status != "approved" {
+        return None;
+    }
+
+    let current_target = target.to_string();
 
     let Some(approved_commit) = review.approved_commit.clone() else {
         return Some(ApprovalCoverage {
@@ -918,6 +977,188 @@ mod tests {
         }
     }
 
+    // ---- Detached HEAD (git worktrees, maw workspaces): the anchor is a
+    // ---- fixed commit that new commits do not move (bn-2ypz).
+
+    mod git_detached {
+        use super::approved_review;
+        use crate::range::{
+            approval_coverage, approval_coverage_at, effective_approval_target, ApprovalCoverage,
+            StaleReason,
+        };
+        use crate::scm::git::GitRepo;
+        use crate::scm::ScmRepo;
+        use std::path::Path;
+        use std::process::Command;
+        use tempfile::TempDir;
+
+        const LOG: &str = ".seal/reviews/cr-1/events.jsonl";
+
+        fn git(repo: &Path, args: &[&str]) -> String {
+            let output = Command::new("git")
+                .current_dir(repo)
+                .args(args)
+                .output()
+                .expect("run git");
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout)
+                .expect("utf8")
+                .trim()
+                .to_string()
+        }
+
+        fn append(repo: &Path, path: &str, body: &str) {
+            let full = repo.join(path);
+            std::fs::create_dir_all(full.parent().expect("parent")).expect("mkdir");
+            let old = std::fs::read_to_string(&full).unwrap_or_default();
+            std::fs::write(full, format!("{old}{body}")).expect("write");
+        }
+
+        fn commit_all(repo: &Path, message: &str) -> String {
+            git(repo, &["add", "-A"]);
+            git(repo, &["commit", "-q", "--allow-empty", "-m", message]);
+            git(repo, &["rev-parse", "HEAD"])
+        }
+
+        /// A repo on a detached HEAD at approved commit A. The review is
+        /// anchored the way `seal reviews create` anchors it there.
+        fn detached_at_a() -> (TempDir, GitRepo, String) {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let root = dir.path();
+            git(root, &["init", "-q"]);
+            git(root, &["config", "user.email", "test@example.com"]);
+            git(root, &["config", "user.name", "Test User"]);
+            append(root, "src/lib.rs", "pub fn f() {}\n");
+            append(root, LOG, "{\"event\":\"created\"}\n");
+            let a = commit_all(root, "feature");
+            git(root, &["branch", "-M", "main"]);
+            git(root, &["checkout", "-q", "--detach"]);
+            let scm = GitRepo::new(root.to_path_buf());
+            assert_eq!(
+                scm.current_anchor().expect("anchor"),
+                format!("detached:{a}")
+            );
+            (dir, scm, a)
+        }
+
+        /// An approved review anchored at `detached:<commit>`, as
+        /// `seal reviews create` anchors it on a detached HEAD.
+        fn detached_review(commit: &str) -> crate::projection::ReviewDetail {
+            let mut review = approved_review("approved", Some(commit));
+            review.scm_anchor = format!("detached:{commit}");
+            review.jj_change_id.clone_from(&review.scm_anchor);
+            review.initial_commit = commit.to_string();
+            review
+        }
+
+        fn coverage(scm: &GitRepo, a: &str) -> ApprovalCoverage {
+            approval_coverage(scm, &detached_review(a)).expect("coverage")
+        }
+
+        #[test]
+        fn detached_source_commit_after_lgtm_is_stale() {
+            let (dir, scm, a) = detached_at_a();
+            append(dir.path(), "src/lib.rs", "pub fn unreviewed() {}\n");
+            let b = commit_all(dir.path(), "unreviewed");
+            let c = coverage(&scm, &a);
+            assert_eq!(c.current_target, b, "checked against the workspace commit");
+            assert_eq!(c.stale_reason, Some(StaleReason::CommitsAdded));
+            assert_eq!(c.uncovered_commits, Some(1));
+        }
+
+        #[test]
+        fn detached_review_log_commit_keeps_approval_fresh() {
+            let (dir, scm, a) = detached_at_a();
+            append(dir.path(), LOG, "{\"event\":\"lgtm\"}\n");
+            let b = commit_all(dir.path(), "chore: seal review cr-1");
+            let c = coverage(&scm, &a);
+            assert_eq!(c.current_target, b);
+            assert!(!c.is_stale(), "expected fresh, got {c:?}");
+            assert_eq!(c.uncovered_commits, Some(0));
+            assert_eq!(c.exempt_commits, Some(1));
+        }
+
+        #[test]
+        fn detached_log_then_source_commit_is_stale() {
+            let (dir, scm, a) = detached_at_a();
+            append(dir.path(), LOG, "{\"event\":\"lgtm\"}\n");
+            commit_all(dir.path(), "chore: seal review cr-1");
+            append(dir.path(), "src/lib.rs", "pub fn unreviewed() {}\n");
+            commit_all(dir.path(), "unreviewed");
+            let c = coverage(&scm, &a);
+            assert_eq!(c.stale_reason, Some(StaleReason::CommitsAdded));
+            assert_eq!(c.uncovered_commits, Some(2));
+        }
+
+        /// A checkout that does not build on the anchor (trunk before the
+        /// merge, another reviewer's workspace) cannot merge the reviewed
+        /// code, so the approval is judged against the anchor.
+        #[test]
+        fn checkout_not_descending_from_anchor_reports_against_anchor() {
+            let (dir, scm, a) = detached_at_a();
+            // The reviewed change B sits on top of A, detached.
+            append(dir.path(), "src/lib.rs", "pub fn reviewed() {}\n");
+            let b = commit_all(dir.path(), "reviewed");
+            // Trunk moves on with unrelated source work, and we look from it.
+            git(dir.path(), &["checkout", "-q", "main"]);
+            append(dir.path(), "src/other.rs", "pub fn trunk() {}\n");
+            let t = commit_all(dir.path(), "trunk work");
+            assert_ne!(scm.current_commit().expect("head"), b);
+
+            let review = detached_review(&b);
+            assert_eq!(effective_approval_target(&scm, &review), b);
+            let c = approval_coverage(&scm, &review).expect("coverage");
+            assert_eq!(c.current_target, b);
+            assert!(!c.is_stale(), "expected fresh, got {c:?}");
+
+            // Trunk root (an ancestor of the anchor) also reports the anchor.
+            git(dir.path(), &["checkout", "-q", "--detach", &a]);
+            assert_eq!(effective_approval_target(&scm, &review), b);
+            // And an explicit target is checked as given.
+            let at_t = approval_coverage_at(&scm, &review, &t).expect("coverage");
+            assert_eq!(at_t.current_target, t);
+            assert!(at_t.is_stale(), "trunk work is not covered: {at_t:?}");
+        }
+
+        /// A merged review is judged against its recorded final commit, never
+        /// the workspace.
+        #[test]
+        fn merged_review_ignores_the_workspace_commit() {
+            let (dir, scm, a) = detached_at_a();
+            append(dir.path(), "src/lib.rs", "pub fn later() {}\n");
+            commit_all(dir.path(), "later");
+            let mut review = detached_review(&a);
+            review.final_commit = Some(a.clone());
+            assert_eq!(effective_approval_target(&scm, &review), a);
+        }
+
+        /// Branch anchors move with their commits, so on the branch the
+        /// workspace commit and the anchored target agree, as before.
+        #[test]
+        fn branch_anchor_on_the_branch_is_unchanged() {
+            let (dir, scm, a) = detached_at_a();
+            git(dir.path(), &["checkout", "-q", "main"]);
+            append(dir.path(), LOG, "{\"event\":\"lgtm\"}\n");
+            let b = commit_all(dir.path(), "chore: seal");
+            let mut review = approved_review("approved", Some(&a));
+            review.scm_anchor = "refs/heads/main".to_string();
+            review.jj_change_id.clone_from(&review.scm_anchor);
+            review.initial_commit.clone_from(&a);
+            let c = approval_coverage(&scm, &review).expect("coverage");
+            assert_eq!(c.current_target, b);
+            assert!(!c.is_stale());
+            append(dir.path(), "src/lib.rs", "pub fn g() {}\n");
+            commit_all(dir.path(), "source");
+            let c = approval_coverage(&scm, &review).expect("coverage");
+            assert_eq!(c.stale_reason, Some(StaleReason::CommitsAdded));
+            assert_eq!(c.uncovered_commits, Some(2));
+        }
+    }
+
     // ---- jj: writing the review log into the approved change rewrites the
     // ---- approved commit (bn-3rk0).
 
@@ -1021,6 +1262,34 @@ mod tests {
             assert_eq!(c.stale_reason, Some(StaleReason::CommitsAdded));
             assert_eq!(c.uncovered_commits, None);
             assert_eq!(c.exempt_commits, None);
+        }
+
+        /// `jj new` leaves the anchored change behind. Code in the new
+        /// working-copy change is what merges next, so it stales the LGTM.
+        #[test]
+        fn jj_new_change_with_source_makes_approval_stale() {
+            let Some((dir, scm, change, a)) = change_approved_at_a() else {
+                return;
+            };
+            jj(dir.path(), &["new"]);
+            append(dir.path(), "src/lib.rs", "pub fn g() {}\n");
+            let c = coverage(&scm, &change, &a);
+            assert_eq!(c.current_target, scm.current_commit().expect("@"));
+            assert_ne!(c.current_target, a);
+            assert_eq!(c.stale_reason, Some(StaleReason::CommitsAdded));
+            assert_eq!(c.uncovered_commits, Some(1));
+        }
+
+        #[test]
+        fn jj_new_change_with_review_log_keeps_approval_fresh() {
+            let Some((dir, scm, change, a)) = change_approved_at_a() else {
+                return;
+            };
+            jj(dir.path(), &["new"]);
+            append(dir.path(), LOG, "{\"event\":\"lgtm\"}\n");
+            let c = coverage(&scm, &change, &a);
+            assert_eq!(c.current_target, scm.current_commit().expect("@"));
+            assert!(!c.is_stale(), "expected fresh, got {c:?}");
         }
 
         #[test]

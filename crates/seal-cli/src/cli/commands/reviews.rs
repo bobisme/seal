@@ -10,8 +10,8 @@ use seal_core::anchor::{AnchorLocation, AnchorLocator, AnchorStatus};
 use seal_core::events::VoteType;
 use seal_core::projection::{ReviewDetail, ThreadSummary};
 use seal_core::range::{
-    approval_coverage, resolve_new_review_base, resolve_review_range, resolve_target_commit,
-    ApprovalCoverage, StaleReason,
+    approval_coverage, approval_coverage_at, resolve_new_review_base, resolve_review_range,
+    resolve_target_commit, ApprovalCoverage, StaleReason,
 };
 use seal_core::scm::{git_diff_section_path, ScmKind, ScmRepo};
 use seal_core::sealignore::{AllFilesIgnoredError, SealIgnore};
@@ -53,7 +53,7 @@ fn stale_approval_message(
     };
 
     format!(
-        "Cannot merge {review_id}: the approval does not cover the current code.\n  {detail}\n\n  To fix: ask a reviewer to vote again with 'seal lgtm {review_id}',\n  or merge anyway with --allow-stale-approval."
+        "Cannot merge {review_id}: the approval does not cover the current code.\n  {detail}\n\n  To fix: if the review does not show the new commits yet, run\n  'seal reviews retarget {review_id}' first. Then ask a reviewer to vote\n  again with 'seal lgtm {review_id}', or merge anyway with\n  --allow-stale-approval. If the approved code already landed through a\n  merge commit, record the approved commit with '--commit <approved-commit>'."
     )
 }
 
@@ -505,12 +505,27 @@ pub fn run_reviews_merge(
             "Cannot merge unapproved review: {review_id}. Approve it first, or use --self-approve."
         );
     }
+
+    // The commit this merge records. It is resolved before any check, because
+    // the approval gate must check exactly this commit: checking the anchored
+    // review target instead lets a detached HEAD or a `jj new` merge code
+    // committed after the LGTM (bn-2ypz).
+    let final_commit = match commit {
+        Some(rev) => scm.commit_for_anchor(&rev).with_context(|| {
+            format!(
+                "Failed to resolve --commit {rev}\n  To fix: pass a revision this repository knows, such as a commit hash or HEAD"
+            )
+        })?,
+        None => scm
+            .current_commit()
+            .context("Failed to get current commit for merge")?,
+    };
+
     if review.status == "open" && self_approve {
         // Auto-approve the review first, against the commit being merged.
-        let approved_commit = resolve_target_commit(scm, &review);
         services
             .reviews()
-            .approve(review_id, author, Some(approved_commit))?;
+            .approve(review_id, author, Some(final_commit.clone()))?;
     }
 
     // Re-open the database to get fresh state after any approval
@@ -524,7 +539,7 @@ pub fn run_reviews_merge(
     // warns instead: blocking every in-flight review on upgrade would punish
     // teams for a gap they did not create.
     let review = services.reviews().get(review_id)?;
-    let coverage = approval_coverage(scm, &review);
+    let coverage = approval_coverage_at(scm, &review, &final_commit);
     if let Some(coverage) = &coverage {
         match coverage.stale_reason.as_ref() {
             Some(StaleReason::CommitsAdded) if !allow_stale => {
@@ -564,14 +579,6 @@ pub fn run_reviews_merge(
             review_id
         );
     }
-
-    // Get final commit hash - either provided or auto-detected from active backend.
-    let final_commit = match commit {
-        Some(c) => c,
-        None => scm
-            .current_commit()
-            .context("Failed to get current commit for merge")?,
-    };
 
     services
         .reviews()
@@ -659,7 +666,10 @@ fn run_vote(
     // Resolve author identity for output and auto-approve check
     let author_str = seal_core::events::get_agent_identity(author)?;
 
-    // Record the code this vote applied to.
+    // Record the code this vote applied to: the anchored review target,
+    // which is what `seal diff` shows the reviewer. Commits on top of it in
+    // this workspace were not shown, so the vote does not cover them; the
+    // author runs `seal reviews retarget` to bring them into the review.
     let voted_commit = resolve_target_commit(scm, &review);
 
     services.reviews().vote(
@@ -1839,9 +1849,17 @@ mod merge_gate_tests {
         );
     }
 
-    /// LGTM at commit A on branch `feature`, then `after` runs and commits
-    /// with `git add -A`. Returns the result of `seal reviews mark-merged`.
-    fn merge_after(after: impl FnOnce(&Path, &str)) -> Result<()> {
+    fn commit_all(repo: &Path, message: &str) -> String {
+        git(repo, &["add", "-A"]);
+        git(repo, &["commit", "-q", "--allow-empty", "-m", message]);
+        GitRepo::new(repo.to_path_buf())
+            .current_commit()
+            .expect("HEAD")
+    }
+
+    /// Commit A on branch `feature` in a new repo. With `detach`, HEAD is
+    /// then detached at A, as in a git worktree or maw workspace.
+    fn feature_repo(detach: bool) -> tempfile::TempDir {
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path();
         git(root, &["init", "-q"]);
@@ -1852,20 +1870,24 @@ mod merge_gate_tests {
         std::fs::write(root.join(".seal/version"), "2\n").expect("write");
         std::fs::write(root.join(".seal/.gitignore"), "index.db*\n").expect("write");
         std::fs::write(root.join("src/lib.rs"), "pub fn f() {}\n").expect("write");
-        git(root, &["add", "-A"]);
-        git(root, &["commit", "-q", "-m", "base"]);
+        commit_all(root, "base");
         git(root, &["checkout", "-q", "-b", "feature"]);
         std::fs::write(root.join("src/lib.rs"), "pub fn g() {}\n").expect("write");
-        git(root, &["add", "-A"]);
-        git(root, &["commit", "-q", "-m", "feature"]);
+        commit_all(root, "feature");
+        if detach {
+            git(root, &["checkout", "-q", "--detach"]);
+        }
+        dir
+    }
 
-        let scm = GitRepo::new(root.to_path_buf());
-        let approved = scm.current_commit().expect("A");
+    /// Create a review of the current commit and LGTM + approve it there.
+    fn approved_review(root: &Path, scm: &dyn ScmRepo) -> String {
         let review_id = open_services(root)
             .expect("services")
             .reviews()
-            .create(&scm, "t".to_string(), None, None, Some("alice"), None)
+            .create(scm, "t".to_string(), None, None, Some("alice"), None)
             .expect("create");
+        let approved = scm.current_commit().expect("A");
         open_services(root)
             .expect("services")
             .reviews()
@@ -1882,21 +1904,51 @@ mod merge_gate_tests {
             .reviews()
             .approve(&review_id, Some("bob"), Some(approved))
             .expect("approve");
+        review_id
+    }
 
-        after(root, &review_id);
-        git(root, &["add", "-A"]);
-        git(root, &["commit", "-q", "--allow-empty", "-m", "after lgtm"]);
-
+    fn mark_merged(
+        root: &Path,
+        scm: &dyn ScmRepo,
+        review_id: &str,
+        commit: Option<String>,
+    ) -> Result<()> {
         run_reviews_merge(
             root,
-            &scm,
-            &review_id,
-            None,
+            scm,
+            review_id,
+            commit,
             false,
             false,
             Some("alice"),
             OutputFormat::Json,
         )
+    }
+
+    fn final_commit(root: &Path, review_id: &str) -> Option<String> {
+        open_services(root)
+            .expect("services")
+            .reviews()
+            .get(review_id)
+            .expect("review")
+            .final_commit
+    }
+
+    /// LGTM at commit A (on branch `feature`, or detached at it), then
+    /// `after` runs and commits with `git add -A`. Returns the result of
+    /// `seal reviews mark-merged`.
+    fn merge_after_on(detach: bool, after: impl FnOnce(&Path, &str)) -> Result<()> {
+        let dir = feature_repo(detach);
+        let root = dir.path();
+        let scm = GitRepo::new(root.to_path_buf());
+        let review_id = approved_review(root, &scm);
+        after(root, &review_id);
+        commit_all(root, "after lgtm");
+        mark_merged(root, &scm, &review_id, None)
+    }
+
+    fn merge_after(after: impl FnOnce(&Path, &str)) -> Result<()> {
+        merge_after_on(false, after)
     }
 
     #[test]
@@ -1923,5 +1975,178 @@ mod merge_gate_tests {
         })
         .expect_err("stale");
         assert!(err.to_string().contains("does not cover"), "{err}");
+    }
+
+    // ---- bn-2ypz: a detached HEAD anchors the review to a fixed commit, so
+    // ---- the gate must check the commit that merges, not the anchor.
+
+    #[test]
+    fn detached_source_commit_after_lgtm_blocks_merge() {
+        let err = merge_after_on(true, |root, _| {
+            std::fs::write(root.join("src/lib.rs"), "pub fn evil() {}\n").expect("write");
+        })
+        .expect_err("stale");
+        assert!(
+            err.to_string().contains("does not cover the current code"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn detached_review_log_commit_does_not_block_merge() {
+        merge_after_on(true, |_, _| {}).expect("merge succeeds");
+    }
+
+    #[test]
+    fn worktree_source_commit_after_lgtm_blocks_merge() {
+        let dir = feature_repo(false);
+        let wt = dir.path().join("wt");
+        git(
+            dir.path(),
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "--detach",
+                wt.to_str().expect("utf8"),
+            ],
+        );
+        let scm = GitRepo::new(wt.clone());
+        assert!(scm
+            .current_anchor()
+            .expect("anchor")
+            .starts_with("detached:"));
+        let review_id = approved_review(&wt, &scm);
+        std::fs::write(wt.join("src/lib.rs"), "pub fn evil() {}\n").expect("write");
+        commit_all(&wt, "after lgtm");
+        let err = mark_merged(&wt, &scm, &review_id, None).expect_err("stale");
+        assert!(err.to_string().contains("does not cover"), "{err}");
+        assert_eq!(final_commit(&wt, &review_id), None);
+    }
+
+    #[test]
+    fn explicit_commit_on_unreviewed_descendant_blocks_merge() {
+        // Branch anchor: the review target stays at A while `--commit`
+        // names B, an unreviewed descendant built elsewhere.
+        let dir = feature_repo(false);
+        let root = dir.path();
+        let scm = GitRepo::new(root.to_path_buf());
+        let review_id = approved_review(root, &scm);
+        commit_all(root, "chore: seal review");
+        git(root, &["checkout", "-q", "-b", "other"]);
+        std::fs::write(root.join("src/lib.rs"), "pub fn evil() {}\n").expect("write");
+        let b = commit_all(root, "unreviewed");
+        git(root, &["checkout", "-q", "feature"]);
+
+        let err = mark_merged(root, &scm, &review_id, Some(b)).expect_err("stale");
+        assert!(err.to_string().contains("does not cover"), "{err}");
+        assert_eq!(final_commit(root, &review_id), None);
+    }
+
+    #[test]
+    fn explicit_commit_is_recorded_as_resolved_commit_id() {
+        let dir = feature_repo(false);
+        let root = dir.path();
+        let scm = GitRepo::new(root.to_path_buf());
+        let review_id = approved_review(root, &scm);
+        let head = scm.current_commit().expect("HEAD");
+        mark_merged(root, &scm, &review_id, Some("HEAD".to_string())).expect("merge");
+        assert_eq!(final_commit(root, &review_id), Some(head));
+    }
+
+    #[test]
+    fn self_approve_approves_the_final_commit() {
+        let dir = feature_repo(true);
+        let root = dir.path();
+        let scm = GitRepo::new(root.to_path_buf());
+        let review_id = open_services(root)
+            .expect("services")
+            .reviews()
+            .create(&scm, "t".to_string(), None, None, Some("alice"), None)
+            .expect("create");
+        std::fs::write(root.join("src/lib.rs"), "pub fn later() {}\n").expect("write");
+        let b = commit_all(root, "after create");
+        run_reviews_merge(
+            root,
+            &scm,
+            &review_id,
+            None,
+            true,
+            false,
+            Some("alice"),
+            OutputFormat::Json,
+        )
+        .expect("self-approved merge");
+        let review = open_services(root)
+            .expect("services")
+            .reviews()
+            .get(&review_id)
+            .expect("review");
+        assert_eq!(review.approved_commit.as_deref(), Some(b.as_str()));
+        assert_eq!(review.final_commit.as_deref(), Some(b.as_str()));
+    }
+
+    mod jj {
+        use super::*;
+        use seal_core::scm::jj::JjScmRepo;
+
+        fn jj(root: &Path, args: &[&str]) {
+            let output = Command::new("jj")
+                .current_dir(root)
+                .args([
+                    "--config",
+                    "user.name=Test",
+                    "--config",
+                    "user.email=t@example.com",
+                ])
+                .args(args)
+                .output()
+                .expect("run jj");
+            assert!(
+                output.status.success(),
+                "jj {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        /// LGTM on the working-copy change, then `jj new` and `edit`.
+        fn merge_after_jj_new(edit: impl FnOnce(&Path)) -> Option<Result<()>> {
+            if Command::new("jj").arg("--version").output().is_err() {
+                eprintln!("skipping: jj not installed");
+                return None;
+            }
+            let dir = tempfile::tempdir().expect("tempdir");
+            let root = dir.path();
+            jj(root, &["git", "init", "."]);
+            std::fs::create_dir_all(root.join("src")).expect("mkdir");
+            std::fs::create_dir_all(root.join(".seal/reviews")).expect("mkdir");
+            std::fs::write(root.join(".seal/version"), "2\n").expect("write");
+            std::fs::write(root.join(".seal/.gitignore"), "index.db*\n").expect("write");
+            std::fs::write(root.join("src/lib.rs"), "pub fn f() {}\n").expect("write");
+            let scm = JjScmRepo::new(root);
+            let review_id = approved_review(root, &scm);
+            jj(root, &["new"]);
+            edit(root);
+            Some(mark_merged(root, &scm, &review_id, None))
+        }
+
+        #[test]
+        fn jj_new_with_source_change_blocks_merge() {
+            let Some(result) = merge_after_jj_new(|root| {
+                std::fs::write(root.join("src/lib.rs"), "pub fn evil() {}\n").expect("write");
+            }) else {
+                return;
+            };
+            let err = result.expect_err("stale");
+            assert!(err.to_string().contains("does not cover"), "{err}");
+        }
+
+        #[test]
+        fn jj_new_without_source_change_merges() {
+            let Some(result) = merge_after_jj_new(|_| {}) else {
+                return;
+            };
+            result.expect("merge succeeds");
+        }
     }
 }

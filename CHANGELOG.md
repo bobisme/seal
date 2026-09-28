@@ -8,6 +8,16 @@ prior to v0.27.0, see the [git tags](https://github.com/bobisme/seal/tags).
 
 ## [Unreleased]
 
+### Fixed
+- The stale-approval gate missed code committed after the LGTM on a detached HEAD
+  (git worktrees, maw workspaces) and after `jj new`, because it checked the anchored
+  review target, which those commits do not move. `seal reviews mark-merged` now checks
+  the approval against the exact commit it records as `final_commit` (`--commit`,
+  resolved to a commit id, or the current commit), and `--self-approve` approves that
+  commit. `seal diff`, `seal reviews request` and the LGTM refresh check the workspace
+  commit when it builds on the review target. `seal diff` JSON adds
+  `approval_target_commit`. Affected since the gate shipped in 0.28.0.
+
 ## [0.30.0] - 2026-09-27
 
 Review ranges and approvals now survive rebases and committed review logs. The

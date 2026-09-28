@@ -257,6 +257,9 @@ pub fn run_diff(
         "suggested_base": stale_base.as_ref().map(|stale| stale.discovered.clone()),
         "approval_stale": coverage.as_ref().map(seal_core::range::ApprovalCoverage::is_stale),
         "approved_commit": coverage.as_ref().and_then(|c| c.approved_commit.clone()),
+        // The commit the approval was checked against: the workspace commit
+        // when it builds on target_commit, else target_commit.
+        "approval_target_commit": coverage.as_ref().map(|c| c.current_target.clone()),
         "uncovered_commits": coverage.as_ref().and_then(|c| c.uncovered_commits),
         "exempt_commits": coverage.as_ref().and_then(|c| c.exempt_commits),
         "initial_commit": review.initial_commit,

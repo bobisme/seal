@@ -365,7 +365,8 @@ pub enum ReviewsCommands {
         /// Review ID
         review_id: String,
 
-        /// Final commit hash (auto-detected from @ if not provided)
+        /// Final commit (a commit hash or revision; defaults to the current
+        /// commit, HEAD or @). The approval must cover this exact commit.
         #[arg(long)]
         commit: Option<String>,
 
