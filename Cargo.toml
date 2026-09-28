@@ -7,7 +7,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.29.0"
+version = "0.30.0"
 edition = "2021"
 license = "MIT"
 authors = ["Bob <shiftsource@gmail.com>"]
@@ -52,8 +52,8 @@ proptest = "1.7"
 tempfile = "3.24.0"
 
 # Internal
-seal-core = { path = "crates/seal-core", version = "0.29.0" }
-seal-tui = { path = "crates/seal-tui", version = "0.29.0" }
+seal-core = { path = "crates/seal-core", version = "0.30.0" }
+seal-tui = { path = "crates/seal-tui", version = "0.30.0" }
 
 [workspace.lints.rust]
 # Kani sets cfg(kani) when it builds proof harnesses.

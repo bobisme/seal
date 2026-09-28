@@ -8,6 +8,55 @@ prior to v0.27.0, see the [git tags](https://github.com/bobisme/seal/tags).
 
 ## [Unreleased]
 
+## [0.30.0] - 2026-09-27
+
+Review ranges and approvals now survive rebases and committed review logs. The
+projection, log sync, drift and approval code gained Kani proofs and property tests,
+and those tests found several of the bugs fixed below.
+
+### Added
+- `seal reviews retarget --base <rev>` sets the review base explicitly.
+- Retarget re-derives the base after a rebase: when trunk moved under the branch, the
+  base moves to the new fork point. `ReviewRetargeted` records `old_base_commit` and
+  `new_base_commit` (optional fields; older logs still parse). Retarget output reports the
+  base change.
+- `seal diff` warns when a review's base is behind the branch's fork point
+  (`base_warning`, `suggested_base` in JSON) and prints the retarget command.
+- Thread output reports the thread's location in the review target after a rebase:
+  `seal review`, `seal diff`, `seal status`, `seal threads show` and `seal threads list` add
+  `current_selection_start/end`, `drift_status` (`unchanged`, `shifted`, `modified`,
+  `deleted`, `unknown`) and `outdated`. All JSON changes are additive.
+- The TUI places threads at their mapped line, marks outdated threads, and shows the code
+  as it was at the thread's commit for modified and deleted threads.
+- `seal diff`/`status` JSON reports `exempt_commits`.
+- `just kani` runs the Kani proof harnesses.
+
+### Changed
+- An approval stays fresh when later changes only touch `.seal/` (component-wise), with
+  review logs append-only. Committing the review log after an LGTM no longer blocks
+  `seal reviews mark-merged`. This also holds when the log is amended into the approved
+  commit (jj `@`, `git commit --amend`). Any change outside `.seal/`, any rewrite of a
+  review log, and any failure to compare stays stale.
+- Base discovery picks the trunk merge-base nearest the target, so a lagging
+  `origin/main` no longer widens a new review's range. A branch's own pushed copy is not
+  a trunk candidate.
+- Retarget of a legacy review (no stored base) adopts a discovered base.
+- `seal status` measures thread drift against the review target, not the checked-out
+  commit.
+
+### Fixed
+- `seal sync --accept-regression` rebuilds the one review atomically from its log. A
+  retargeted review no longer fails to replay, and other reviews are untouched.
+- Sync detects a same-length in-place edit of a review log (v2 path).
+- Sync with an empty `review_file_state` rebuilds each on-disk review instead of assuming
+  the projection is current.
+- Drift calculation no longer overflows (panic or wrap) on extreme hunk headers.
+- An approval that names a revision expression (`HEAD`, `@`) instead of a commit id is
+  stale.
+- `seal review` no longer highlights stale lines for rebased threads, and `seal status`
+  no longer reports `unchanged` for a thread whose commit cannot be read.
+- Mapping a thread range costs time linear in the diff, not in the range length.
+
 ## [0.29.0] - 2026-08-25
 
 ### Added
