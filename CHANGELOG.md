@@ -8,6 +8,8 @@ prior to v0.27.0, see the [git tags](https://github.com/bobisme/seal/tags).
 
 ## [Unreleased]
 
+## [0.30.1] - 2026-09-28
+
 ### Fixed
 - The stale-approval gate missed code committed after the LGTM on a detached HEAD
   (git worktrees, maw workspaces) and after `jj new`, because it checked the anchored
@@ -17,6 +19,18 @@ prior to v0.27.0, see the [git tags](https://github.com/bobisme/seal/tags).
   commit. `seal diff`, `seal reviews request` and the LGTM refresh check the workspace
   commit when it builds on the review target. `seal diff` JSON adds
   `approval_target_commit`. Affected since the gate shipped in 0.28.0.
+- Base discovery treated a branch's own pushed copy under a different name
+  (`feature` tracking `origin/feature-v2`) as trunk, which could move a review's base
+  past already-pushed commits. An upstream whose tip is already in HEAD and that no
+  other ref contains is now skipped. When nothing else is found, its merge-base is used,
+  never a one-commit range.
+
+### Changed
+- `seal agents show` documents the git + maw workflow: `maw exec <ws> -- seal ...`,
+  retarget before a re-request, `mark-merged` before the merge, `--format json`, and when
+  `--self-approve` is acceptable. A test parses every example against the CLI.
+- `seal reviews mark-merged --commit` rejects a value that does not resolve to a local
+  commit.
 
 ## [0.30.0] - 2026-09-27
 
