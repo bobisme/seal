@@ -63,14 +63,16 @@ impl GitRepo {
         }
     }
 
-    /// Return the configured upstream of the current branch when it can mark
-    /// a trunk, as a full ref name.
+    /// Return the configured upstream of the current branch, classified for
+    /// trunk discovery.
     ///
     /// An upstream that is the branch's own remote copy (`git push -u origin
     /// feature` makes `origin/feature` the upstream of `feature`) is not
     /// trunk. Its merge base is the pushed tip, the nearest of all candidates,
     /// so accepting it would drop every pushed feature commit from the range.
-    fn maybe_upstream_ref(&self) -> Option<String> {
+    /// The same holds when the copy is pushed under a *different* name
+    /// (`git push -u origin feature:feature-v2`); see [`Self::is_own_remote_copy`].
+    fn classify_upstream(&self) -> Option<Upstream> {
         let head = self.maybe_symbolic_ref_head()?;
         let output = self
             .run_git(&[
@@ -84,10 +86,100 @@ impl GitRepo {
         let mut fields = line.split('\0');
         let upstream = fields.next()?.trim();
         let remote_ref = fields.next().unwrap_or_default();
-        if upstream.is_empty() || is_own_remote_copy(&head, remote_ref) {
+        if upstream.is_empty() {
             return None;
         }
-        Some(upstream.to_string())
+        if self.is_own_remote_copy(&head, upstream, remote_ref) {
+            Some(Upstream::OwnCopy(upstream.to_string()))
+        } else {
+            Some(Upstream::Trunk(upstream.to_string()))
+        }
+    }
+
+    /// True when the upstream `upstream` (full local ref, e.g.
+    /// `refs/remotes/origin/feature-v2`; its ref on the remote side is
+    /// `remote_ref`) is the current branch `head_ref`'s own remote copy
+    /// rather than a trunk ref.
+    ///
+    /// Fast path: same name (`origin/feature` for `feature`) is the common
+    /// case from a plain `git push -u origin feature` and needs no further
+    /// checks.
+    ///
+    /// A differently-named upstream (pushed with `git push -u origin
+    /// feature:feature-v2`) is still treated as the branch's own copy when
+    /// BOTH hold:
+    ///  (a) the upstream's tip is an ancestor of (or equal to) HEAD — this
+    ///      branch already contains everything the upstream does, so it is
+    ///      not a line of history this branch is based on; and
+    ///  (b) no ref other than `head_ref` and `upstream` contains that tip:
+    ///      no other local branch, no other remote-tracking ref (a symbolic
+    ///      `*/HEAD` alias doesn't count as another ref), and no tag.
+    ///
+    /// When either check fails the ref is kept as a trunk candidate. That is
+    /// the deliberately safe direction: a real trunk ref that happens to be
+    /// an ancestor of HEAD and unreferenced elsewhere (say `origin/release-2.x`
+    /// that hasn't moved and exists nowhere else) gets misclassified as this
+    /// branch's own copy only in the rare case both hold, and even then the
+    /// effect is to fall through to a farther candidate, which *widens* the
+    /// review range (the reviewer sees extra, already-merged commits — safe).
+    /// The opposite mistake — treating a pushed copy of this branch as trunk
+    /// — *narrows* the range past commits that were already pushed and
+    /// silently hides them, which is unsafe. Any failure to resolve a commit
+    /// or run git here is treated the same way: not the branch's own copy,
+    /// so the ref is kept as trunk.
+    fn is_own_remote_copy(&self, head_ref: &str, upstream: &str, remote_ref: &str) -> bool {
+        if remote_ref == head_ref {
+            return true;
+        }
+
+        let Ok(upstream_commit) = self.commit_for_anchor(upstream) else {
+            return false;
+        };
+        let Ok(head_commit) = self.commit_for_anchor("HEAD") else {
+            return false;
+        };
+
+        // Condition (a): the upstream tip must already be on HEAD. `git
+        // merge-base --is-ancestor` treats a commit as its own ancestor, so
+        // an upstream at the exact same tip as HEAD also satisfies this.
+        if !self
+            .is_ancestor(&upstream_commit, &head_commit)
+            .unwrap_or(false)
+        {
+            return false;
+        }
+
+        // Condition (b): nothing besides `head_ref`/`upstream` names that tip.
+        !self.other_ref_contains(&upstream_commit, head_ref, upstream)
+    }
+
+    /// True when some ref other than `head_ref` or `upstream_ref` contains
+    /// `commit`: another local branch, another remote-tracking ref (a
+    /// symbolic `*/HEAD` alias such as `refs/remotes/origin/HEAD` doesn't
+    /// count, since it only points at another ref already in this list), or
+    /// a tag. On a git error, conservatively answers "yes" (some other ref
+    /// might contain it), which keeps the caller's ref classified as trunk.
+    fn other_ref_contains(&self, commit: &str, head_ref: &str, upstream_ref: &str) -> bool {
+        let Ok(output) = self.run_git(&[
+            "for-each-ref",
+            "--contains",
+            commit,
+            "--format=%(refname)",
+            "--end-of-options",
+            "refs/heads",
+            "refs/remotes",
+            "refs/tags",
+        ]) else {
+            return true;
+        };
+
+        output.lines().any(|refname| {
+            let refname = refname.trim();
+            !refname.is_empty()
+                && refname != head_ref
+                && refname != upstream_ref
+                && !refname.ends_with("/HEAD")
+        })
     }
 
     /// Return the merge base of `candidate` and `target`, if both resolve.
@@ -106,6 +198,20 @@ impl GitRepo {
             Some(base)
         }
     }
+}
+
+/// The current branch's configured upstream, classified for trunk discovery.
+enum Upstream {
+    /// Usable directly as a trunk candidate, alongside [`GIT_BASE_CANDIDATES`].
+    Trunk(String),
+    /// Classified as this branch's own remote copy ([`GitRepo::is_own_remote_copy`])
+    /// and excluded from the primary candidate list. Still remembered: if no
+    /// other candidate yields a base, its merge base with the target is used
+    /// as a last resort in [`GitRepo::discover_base_commit`], since the
+    /// upstream's tip is an ancestor of HEAD and so that merge base is always
+    /// at least as wide as the parent-of-target fallback the caller would
+    /// otherwise fall through to.
+    OwnCopy(String),
 }
 
 /// Refs tried, in order, when discovering the fork point of a feature branch.
@@ -328,8 +434,13 @@ impl ScmRepo for GitRepo {
 
         let target_commit = self.commit_for_anchor(target)?;
 
-        let candidates = self
-            .maybe_upstream_ref()
+        let upstream = self.classify_upstream();
+        let trunk_upstream = match &upstream {
+            Some(Upstream::Trunk(r)) => Some(r.clone()),
+            Some(Upstream::OwnCopy(_)) | None => None,
+        };
+
+        let candidates = trunk_upstream
             .into_iter()
             .chain(GIT_BASE_CANDIDATES.iter().map(|c| (*c).to_string()));
 
@@ -355,17 +466,28 @@ impl ScmRepo for GitRepo {
             bases.push(base);
         }
 
-        Ok(nearest_base(bases, |ancestor, descendant| {
+        if let Some(base) = nearest_base(bases, |ancestor, descendant| {
             self.is_ancestor(ancestor, descendant).unwrap_or(false)
-        }))
-    }
-}
+        }) {
+            return Ok(Some(base));
+        }
 
-/// True when an upstream whose ref on its remote is `remote_ref` is the
-/// remote copy of the branch `head_ref` itself (same branch name), rather
-/// than another branch such as `main`.
-fn is_own_remote_copy(head_ref: &str, remote_ref: &str) -> bool {
-    remote_ref == head_ref
+        // Last resort: no fixed candidate resolved, and the upstream (if
+        // any) was skipped as this branch's own copy rather than kept as
+        // trunk. That upstream's tip is still an ancestor of HEAD, so its
+        // merge base with the target is the upstream tip itself, which is
+        // always at least as wide as the parent-of-target fallback the
+        // caller (`resolve_new_review_base`) would otherwise use.
+        if let Some(Upstream::OwnCopy(upstream_ref)) = &upstream {
+            if let Some(base) = self.maybe_merge_base(upstream_ref, &target_commit) {
+                if base != target_commit {
+                    return Ok(Some(base));
+                }
+            }
+        }
+
+        Ok(None)
+    }
 }
 
 /// Pick the merge base nearest the target from `bases`, in priority order.
@@ -647,6 +769,204 @@ mod tests {
             repo.count_commits_between(&base, &target).expect("count"),
             Some(1)
         );
+    }
+
+    /// bn-y7nm: `git push -u origin feature:feature-v2` makes `origin/feature-v2`
+    /// the upstream of `feature` even though the names differ. It is still the
+    /// branch's own copy (its tip is on HEAD and nothing else names it), so
+    /// discovery must not stop there: the fork point from main should still be
+    /// found, covering every feature commit, including ones made after the push.
+    #[test]
+    fn test_discover_base_treats_differently_named_pushed_upstream_as_own_copy() {
+        let repo_path = setup_three_commit_feature();
+        let repo = GitRepo::new(repo_path.clone());
+        let main = repo.commit_for_anchor("refs/heads/main").expect("main");
+
+        let origin = tempdir().expect("origin dir");
+        run_git_at(origin.path(), &["init", "-q", "--bare"]);
+        let origin_path = origin.path().to_str().expect("utf8 path");
+        run_git_at(&repo_path, &["remote", "add", "origin", origin_path]);
+        run_git_at(&repo_path, &["push", "-q", "origin", "main"]);
+        run_git_at(
+            &repo_path,
+            &["push", "-q", "-u", "origin", "feature:feature-v2"],
+        );
+
+        // One more local commit after the push under the other name.
+        std::fs::write(repo_path.join("more.txt"), "more\n").expect("write");
+        run_git_at(&repo_path, &["add", "more.txt"]);
+        run_git_at(&repo_path, &["commit", "-m", "feat: one more"]);
+
+        let target = repo.current_commit().expect("target");
+        let base = repo
+            .discover_base_commit(&target)
+            .expect("discover")
+            .expect("a base");
+        assert_eq!(base, main);
+        assert_eq!(
+            repo.count_commits_between(&base, &target).expect("count"),
+            Some(4)
+        );
+    }
+
+    /// A branch can track a differently-named upstream that is a genuine
+    /// trunk ref rather than its own copy: here `feature` tracks
+    /// `origin/release`, but `release` carries a commit `feature` never got.
+    /// Condition (a) (upstream tip is an ancestor of HEAD) fails, so the
+    /// upstream is kept as a trunk candidate.
+    #[test]
+    fn test_discover_base_keeps_trunk_when_tracked_upstream_has_commits_not_on_head() {
+        let repo_path = setup_git_repo();
+        run_git_at(&repo_path, &["branch", "-M", "main"]);
+        let repo = GitRepo::new(repo_path.clone());
+        let root = repo.current_commit().expect("root");
+
+        run_git_at(&repo_path, &["checkout", "-qb", "release"]);
+        std::fs::write(repo_path.join("release.txt"), "r\n").expect("write");
+        run_git_at(&repo_path, &["add", "release.txt"]);
+        run_git_at(&repo_path, &["commit", "-m", "release-only"]);
+
+        let origin = tempdir().expect("origin dir");
+        run_git_at(origin.path(), &["init", "-q", "--bare"]);
+        let origin_path = origin.path().to_str().expect("utf8 path");
+        run_git_at(&repo_path, &["remote", "add", "origin", origin_path]);
+        run_git_at(&repo_path, &["push", "-q", "origin", "release"]);
+
+        run_git_at(&repo_path, &["checkout", "-qb", "feature", "main"]);
+        std::fs::write(repo_path.join("feature.txt"), "f\n").expect("write");
+        run_git_at(&repo_path, &["add", "feature.txt"]);
+        run_git_at(&repo_path, &["commit", "-m", "feat: work"]);
+        run_git_at(
+            &repo_path,
+            &[
+                "branch",
+                "-q",
+                "--set-upstream-to=origin/release",
+                "feature",
+            ],
+        );
+
+        // Remove every fixed candidate so only the upstream (kept as trunk)
+        // can resolve; a wrongly-skipped upstream would leave no base at all.
+        run_git_at(&repo_path, &["branch", "-q", "-D", "main", "release"]);
+
+        let target = repo.current_commit().expect("target");
+        let base = repo
+            .discover_base_commit(&target)
+            .expect("discover")
+            .expect("a base");
+        assert_eq!(base, root);
+    }
+
+    /// A branch can track a differently-named upstream that has not moved
+    /// and is otherwise unreferenced: `feature` tracks `origin/release`,
+    /// `release`'s tip is an ancestor of HEAD (condition a holds) and no
+    /// other ref names that tip (condition b holds), so the upstream is
+    /// skipped as this branch's own copy. That only widens the range: a
+    /// farther candidate (`main`) is used instead, landing at or behind the
+    /// release tip, never past it.
+    #[test]
+    fn test_discover_base_skips_unmoved_uniquely_referenced_upstream() {
+        let repo_path = setup_git_repo();
+        run_git_at(&repo_path, &["branch", "-M", "main"]);
+        let repo = GitRepo::new(repo_path.clone());
+        let root = repo.current_commit().expect("root");
+
+        // A commit shared by release and feature, but never reached by main.
+        run_git_at(&repo_path, &["checkout", "-qb", "work"]);
+        std::fs::write(repo_path.join("work.txt"), "w\n").expect("write");
+        run_git_at(&repo_path, &["add", "work.txt"]);
+        run_git_at(&repo_path, &["commit", "-m", "shared"]);
+        let release_tip = repo.current_commit().expect("release tip");
+
+        run_git_at(&repo_path, &["branch", "-q", "release", "work"]);
+
+        let origin = tempdir().expect("origin dir");
+        run_git_at(origin.path(), &["init", "-q", "--bare"]);
+        let origin_path = origin.path().to_str().expect("utf8 path");
+        run_git_at(&repo_path, &["remote", "add", "origin", origin_path]);
+        run_git_at(&repo_path, &["push", "-q", "origin", "release"]);
+
+        run_git_at(&repo_path, &["checkout", "-qb", "feature", "work"]);
+        std::fs::write(repo_path.join("feature.txt"), "f\n").expect("write");
+        run_git_at(&repo_path, &["add", "feature.txt"]);
+        run_git_at(&repo_path, &["commit", "-m", "feat: work"]);
+        run_git_at(
+            &repo_path,
+            &[
+                "branch",
+                "-q",
+                "--set-upstream-to=origin/release",
+                "feature",
+            ],
+        );
+
+        // Only feature and origin/release may reference the shared commit now.
+        run_git_at(&repo_path, &["branch", "-q", "-D", "work", "release"]);
+
+        let target = repo.current_commit().expect("target");
+        let base = repo
+            .discover_base_commit(&target)
+            .expect("discover")
+            .expect("a base");
+
+        // The upstream was skipped: the base is the farther `main` fork
+        // point, not the (nearer, but wrong) release tip.
+        assert_eq!(base, root);
+        assert!(repo
+            .is_ancestor(&base, &release_tip)
+            .expect("ancestor check"));
+    }
+
+    /// Same shape as the "skip" case above (upstream tip an ancestor of
+    /// HEAD, condition a holds), except the local `release` branch is left
+    /// in place. That other ref still names the upstream's tip, so condition
+    /// b fails and the upstream stays a trunk candidate. It is nearer than
+    /// `main`'s root fork point, so it wins outright: dropping condition (b)
+    /// would instead skip it and fall back to `main`'s farther, wrong base.
+    #[test]
+    fn test_discover_base_keeps_trunk_when_upstream_tip_is_also_a_local_branch() {
+        let repo_path = setup_git_repo();
+        run_git_at(&repo_path, &["branch", "-M", "main"]);
+        let repo = GitRepo::new(repo_path.clone());
+
+        run_git_at(&repo_path, &["checkout", "-qb", "work"]);
+        std::fs::write(repo_path.join("work.txt"), "w\n").expect("write");
+        run_git_at(&repo_path, &["add", "work.txt"]);
+        run_git_at(&repo_path, &["commit", "-m", "shared"]);
+        let release_tip = repo.current_commit().expect("release tip");
+
+        run_git_at(&repo_path, &["branch", "-q", "release", "work"]);
+
+        let origin = tempdir().expect("origin dir");
+        run_git_at(origin.path(), &["init", "-q", "--bare"]);
+        let origin_path = origin.path().to_str().expect("utf8 path");
+        run_git_at(&repo_path, &["remote", "add", "origin", origin_path]);
+        run_git_at(&repo_path, &["push", "-q", "origin", "release"]);
+
+        run_git_at(&repo_path, &["checkout", "-qb", "feature", "work"]);
+        std::fs::write(repo_path.join("feature.txt"), "f\n").expect("write");
+        run_git_at(&repo_path, &["add", "feature.txt"]);
+        run_git_at(&repo_path, &["commit", "-m", "feat: work"]);
+        run_git_at(
+            &repo_path,
+            &[
+                "branch",
+                "-q",
+                "--set-upstream-to=origin/release",
+                "feature",
+            ],
+        );
+
+        // "release" is intentionally kept, unlike the skip test above.
+        run_git_at(&repo_path, &["branch", "-q", "-D", "work"]);
+
+        let target = repo.current_commit().expect("target");
+        let base = repo
+            .discover_base_commit(&target)
+            .expect("discover")
+            .expect("a base");
+        assert_eq!(base, release_tip);
     }
 
     #[test]

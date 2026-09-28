@@ -1402,7 +1402,11 @@ mod tests {
     }
 
     /// An upstream that is another branch (feature created with
-    /// `--track origin/main`) still marks trunk.
+    /// `--track origin/main`) still marks trunk, even under the bn-y7nm rule
+    /// (own-copy only when the upstream tip is an ancestor of HEAD *and*
+    /// uniquely referenced): here main moves ahead of the fork point after
+    /// feature is created, so the upstream tip is no longer an ancestor of
+    /// HEAD and condition (a) fails, keeping it trunk regardless of naming.
     #[test]
     fn upstream_on_another_branch_still_marks_trunk() {
         let mut ws = Workspace::new();
@@ -1414,6 +1418,49 @@ mod tests {
         run_git(ws.root(), &["remote", "add", "up", remote_path]);
         ws.trunk_commit();
         run_git(ws.root(), &["push", "-q", "up", "main"]);
+        let fork_point = ws.scm.commit_for_anchor("refs/heads/main").expect("main");
+        run_git(
+            ws.root(),
+            &["checkout", "-q", "--track", "-b", "feature", "up/main"],
+        );
+
+        // Main moves ahead of the fork point and is pushed again, so
+        // up/main's tip is no longer an ancestor of feature's HEAD.
+        run_git(ws.root(), &["checkout", "-q", "main"]);
+        commit_file(ws.root(), "trunk-ahead.txt", "t\n", "trunk-ahead");
+        run_git(ws.root(), &["push", "-q", "up", "main"]);
+        run_git(ws.root(), &["checkout", "-q", "feature"]);
+        run_git(ws.root(), &["branch", "-q", "-D", "main"]);
+
+        ws.branch_commit();
+        let target = ws.scm.current_commit().expect("target");
+        assert_eq!(
+            ws.scm.discover_base_commit(&target).expect("discover"),
+            Some(fork_point)
+        );
+    }
+
+    /// bn-y7nm: the original shape of the test above, before it was changed
+    /// to make main move ahead. Here `up/main` genuinely never moves, so
+    /// once local `main` is deleted its tip is both an ancestor of HEAD and
+    /// uniquely referenced: `is_own_remote_copy` correctly classifies it as
+    /// feature's own copy and skips it from the primary candidate list. With
+    /// no `origin` remote and no local `main`, no fixed candidate resolves
+    /// either. Before the last-resort fallback, `discover_base_commit`
+    /// returned `None` here and `resolve_new_review_base` fell back to the
+    /// parent of the target: a one-commit range, narrower than either
+    /// reading of the upstream. The fallback now uses the skipped upstream's
+    /// merge base instead, so the base is the `up/main` tip and the range
+    /// still covers every feature commit.
+    #[test]
+    fn upstream_unmoved_and_unreferenced_uses_last_resort_fallback() {
+        let mut ws = Workspace::new();
+        let remote = tempdir().expect("remote dir");
+        run_git(remote.path(), &["init", "-q", "--bare"]);
+        let remote_path = remote.path().to_str().expect("utf8 path");
+        run_git(ws.root(), &["remote", "add", "up", remote_path]);
+        ws.trunk_commit();
+        run_git(ws.root(), &["push", "-q", "up", "main"]);
         let pushed = ws.scm.commit_for_anchor("refs/heads/main").expect("main");
         run_git(
             ws.root(),
@@ -1421,10 +1468,19 @@ mod tests {
         );
         run_git(ws.root(), &["branch", "-q", "-D", "main"]);
         ws.branch_commit();
+
         let target = ws.scm.current_commit().expect("target");
         assert_eq!(
             ws.scm.discover_base_commit(&target).expect("discover"),
-            Some(pushed)
+            Some(pushed.clone())
+        );
+
+        let id = ws.create_review();
+        let range = ws.range(&id);
+        assert_eq!(range.base, pushed);
+        assert_eq!(
+            subjects(ws.root(), &range.base, &range.target),
+            ws.branch_subjects()
         );
     }
 
