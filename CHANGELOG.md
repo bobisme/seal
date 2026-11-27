@@ -8,6 +8,16 @@ prior to v0.27.0, see the [git tags](https://github.com/bobisme/seal/tags).
 
 ## [Unreleased]
 
+## [0.30.2] - 2026-11-27
+
+### Fixed
+- Every command was slow on repos with many reviews: syncing the projection rewrote
+  each unchanged review's file state as a separate fsynced SQLite commit. On a repo
+  with 139 reviews this cost about 1s per command, and `seal ui` syncs twice before it
+  draws (about 2s). An unchanged review log (same line count, prefix hash and byte
+  count) is now skipped with no write: `seal ui` first paint went from 2.03s to 0.07s,
+  and `seal status` from 1.03s to 0.07s. Tamper detection is unchanged.
+
 ## [0.30.1] - 2026-09-28
 
 ### Fixed
