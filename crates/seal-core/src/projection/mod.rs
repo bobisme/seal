@@ -912,6 +912,7 @@ fn filter_orphaned_events_for_repo(
 /// Stored state for a review file from the `review_file_state` table.
 struct StoredFileState {
     line_count: usize,
+    byte_count: u64,
     prefix_hash: String,
 }
 
@@ -928,6 +929,7 @@ fn load_stored_file_states(db: &ProjectionDb) -> Result<HashMap<String, StoredFi
                 row.get::<_, String>(0)?,
                 StoredFileState {
                     line_count: row.get::<_, i64>(1)? as usize,
+                    byte_count: row.get::<_, i64>(2)? as u64,
                     prefix_hash: row.get::<_, String>(3)?,
                 },
             ))
@@ -946,6 +948,11 @@ fn load_stored_file_states(db: &ProjectionDb) -> Result<HashMap<String, StoredFi
 /// and only new events (appended lines) are processed. Files that appear to
 /// have regressed (shrunk, hash mismatch) are skipped to preserve existing
 /// projection data. Returns a `SyncReport` with counts and anomalies.
+///
+/// Each changed file commits on its own. Do not wrap the whole sync in one
+/// transaction: that holds a database lock while every log is read and
+/// hashed, and concurrent seal commands then fail with "database is locked"
+/// (bn-3a54 review th-30papd).
 pub fn sync_from_review_logs(db: &ProjectionDb, seal_root: &Path) -> Result<SyncReport> {
     let mut report = SyncReport {
         applied: 0,
@@ -1114,6 +1121,18 @@ pub fn sync_from_review_logs(db: &ProjectionDb, seal_root: &Path) -> Result<Sync
                             stored.line_count
                         ),
                     });
+                    continue;
+                }
+
+                // UNCHANGED: same line count, the hash over every line matches,
+                // and the byte count matches (so no partial trailing line was
+                // added). The stored state is already correct; do not rewrite
+                // it. Rewriting it here cost one journaled, fsynced write per
+                // review on every command (bn-3a54).
+                if current_line_count == stored.line_count
+                    && log.byte_len().ok() == Some(stored.byte_count)
+                {
+                    report.files_skipped += 1;
                     continue;
                 }
 
@@ -4441,6 +4460,33 @@ mod tests {
         assert_eq!(report2.files_skipped, 1, "should skip unchanged file");
         assert_eq!(report2.files_synced, 0, "no files synced");
         assert!(report2.anomalies.is_empty(), "no anomalies");
+    }
+
+    #[test]
+    fn test_per_file_sync_unchanged_writes_nothing() {
+        // bn-3a54: an unchanged file must not rewrite review_file_state.
+        // Each rewrite was a separate fsynced commit, run once per review
+        // on every command.
+        let dir = tempdir().unwrap();
+        let seal_root = dir.path();
+
+        let db = ProjectionDb::open_in_memory().unwrap();
+        db.init_schema().unwrap();
+
+        for id in ["cr-nw1a", "cr-nw2b", "cr-nw3c"] {
+            let log = crate::log::ReviewLog::new(seal_root, id).unwrap();
+            log.append(&make_review_created(id)).unwrap();
+        }
+        sync_from_review_logs(&db, seal_root).unwrap();
+
+        let before = db.conn().total_changes();
+        let report = sync_from_review_logs(&db, seal_root).unwrap();
+        assert_eq!(report.files_skipped, 3);
+        assert_eq!(
+            db.conn().total_changes(),
+            before,
+            "no-op sync must not write any rows"
+        );
     }
 
     #[test]
