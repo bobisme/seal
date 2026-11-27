@@ -1,0 +1,13 @@
+# bones event log v1
+# fields: wall_ts_us	agent	itc	parents	type	item_id	data	event_hash
+1795813713617973	seal-dev	itc:AQ		item.create	bn-3a54	{"description":"Every seal command runs sync_from_review_logs. For an unchanged review, sync_grew_file's empty-events branch does INSERT OR REPLACE into review_file_state in autocommit mode: one journaled+fsynced txn per review. teapot (139 reviews): ~1s per sync, 572 fsyncs; seal ui syncs twice -> ~2.2s first paint. Fix: skip the write when line/byte/hash state is unchanged; wrap the sync loop in one transaction.","kind":"task","title":"perf: projection sync rewrites file state for every unchanged review (seal ui ~2s startup)"}	blake3:IKys_N97EfafBLZ5TEg4r7DlKRgy2Ch9zllEQxZCy_Q
+1795813721797433	seal-dev	itc:AQ		item.move	bn-3a54	{"state":"doing"}	blake3:CBqQtiDGTmiotY4bJ1rg09KwnLk_dPiyE0vv0fiOnp4
+1795813721801678	seal-dev	itc:AQ		item.assign	bn-3a54	{"action":"assign","agent":"seal-dev"}	blake3:QTl8A8l_BEJN-sSwQwtboX9WLgNdYa-9PxEcFEZofFo
+1795813721815243	seal-dev	itc:AQ		item.comment	bn-3a54	{"body":"Started in workspace bn-3a54"}	blake3:_9C9e2WkNhxxjf2CMfx_05c7kTAMamiw_HNJ6iTwdUk
+1795813936219279	seal-dev	itc:AQ		item.comment	bn-3a54	{"body":"Fix committed 27f97f9 in ws bn-3a54: skip no-op review_file_state writes + one outer savepoint per sync. teapot: seal ui first paint 2.03s->0.08s, status 1.03s->0.07s. Tests pass; fmt ok. Pending: security review + merge."}	blake3:ZuUy2mNaMSdRh9IElpXo_fRjOU25U6bpVLHweq2xWmI
+1795815569350823	seal-dev	itc:AQ		item.comment	bn-3a54	{"body":"cr-33agjx BLOCKed (th-30papd: outer savepoint held read lock across hashing -> concurrent database is locked). Fixed 8b161a0 (savepoint removed; speedup unchanged, ui 0.07s). Retargeted; re-review running. 0x0 TUI blowup was util-linux script buffering /dev/zero, not seal: no guard needed."}	blake3:iFL0x72HXlTXoH5d_87aUAnQKS7rniqWHDutEFFpj-k
+1795815744213508	seal-dev	itc:AQ		item.move	bn-3a54	{"reason":"Completed in workspace bn-3a54","state":"done"}	blake3:XEPyG3vx7Mg2pVTffYQptWeYTdWhmPIEmA5ymvYRu3c
+1795815874423517	seal-dev	itc:AQ		item.create	bn-32zm	{"description":"Bump crates to 0.30.2, Cargo.lock, CHANGELOG for bn-3a54 sync perf fix; tag, push, GitHub release, install.","kind":"task","title":"release: 0.30.2"}	blake3:xb8Rju8bWUEaqu-SyAOJ3YM2qUsalPjXzWQ2V8UkinY
+1795815874877801	seal-dev	itc:AQ		item.move	bn-32zm	{"state":"doing"}	blake3:43C9vEUQ5b06b1qfJO7culKCf7lSNzgb5Cj3u-7wy4k
+1795815874882452	seal-dev	itc:AQ		item.assign	bn-32zm	{"action":"assign","agent":"seal-dev"}	blake3:2fathOgTUfB_6qML-6eQ8mcaOxSoojnI_qi46Y-_B_k
+1795815907778510	seal-dev	itc:AQ		item.move	bn-32zm	{"reason":"Release commit ready","state":"done"}	blake3:Z8PfkIgygKry44bjGQwsybGwyd1JGjed8pOdzWKBeko
